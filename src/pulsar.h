@@ -120,6 +120,8 @@ typedef struct
 
 	size_t read_wait_len;
 	char *read_wait_until;
+	size_t read_wait_ignorelen;
+	char *read_wait_ignore;
 
 	lua_State *rL;
 	char *read_buf;

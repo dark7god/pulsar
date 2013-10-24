@@ -291,13 +291,19 @@ static int pulsar_tcp_client_read_until(lua_State *L) {
 		lua_pushliteral(L, "empty until");
 		return 2;
 	}
+	size_t ignorelen = 0;
+	const char *ignore = NULL;
+	if (lua_isstring(L, 3)) ignore = lua_tolstring(L, 3, &ignorelen);
 
 	/* No need to wait, we may have enough data */
 	if (len <= client->read_buf_pos) {
 		size_t pos = 0;
 		while (pos <= client->read_buf_pos - len) {
 			if (!memcmp(client->read_buf + pos, until, len)) {
-				lua_pushlstring(L, client->read_buf, pos);
+				if (ignorelen && (ignorelen <= pos) && !memcmp(client->read_buf + pos - ignorelen, ignore, ignorelen))
+					lua_pushlstring(L, client->read_buf, pos - ignorelen);
+				else
+					lua_pushlstring(L, client->read_buf, pos);
 				char *newbuf = malloc(client->read_buf_len);
 				if (client->read_buf_pos > pos + len) memcpy(newbuf, client->read_buf + pos + len, client->read_buf_pos);
 				free(client->read_buf);
@@ -312,6 +318,8 @@ static int pulsar_tcp_client_read_until(lua_State *L) {
 	lua_pushthread(L); client->rL = lua_tothread(L, -1); lua_pop(L, 1);
 	client->read_wait_len = WAIT_LEN_UNTIL;
 	client->read_wait_until = strdup(until);
+	client->read_wait_ignorelen = ignorelen;
+	client->read_wait_ignore = strdup(ignore);
 	return lua_yield(L, 0);
 }
 
@@ -368,10 +376,16 @@ static void tcp_client_read_cb(struct ev_loop *loop, struct ev_io *_watcher, int
 	if (client->read_wait_len == WAIT_LEN_UNTIL) {
 		size_t len = strlen(client->read_wait_until);
 		const char *until = client->read_wait_until;
+		size_t ignorelen = client->read_wait_ignorelen;
+		const char *ignore = client->read_wait_ignore;
 		size_t pos = 0;
 		while (pos <= client->read_buf_pos - len) {
 			if (!memcmp(client->read_buf + pos, until, len)) {
-				lua_pushlstring(client->rL, client->read_buf, pos);
+				if (ignorelen && (ignorelen <= pos) && !memcmp(client->read_buf + pos - ignorelen, ignore, ignorelen))
+					lua_pushlstring(client->rL, client->read_buf, pos - ignorelen);
+				else
+					lua_pushlstring(client->rL, client->read_buf, pos);
+
 				char *newbuf = malloc(client->read_buf_len);
 				if (client->read_buf_pos > pos + len) memcpy(newbuf, client->read_buf + pos + len, client->read_buf_pos);
 				free(client->read_buf);
@@ -379,6 +393,8 @@ static void tcp_client_read_cb(struct ev_loop *loop, struct ev_io *_watcher, int
 				client->read_buf_pos -= pos + len;
 				client->read_wait_len = 0;
 				free(client->read_wait_until);
+				if (client->read_wait_ignorelen) free(client->read_wait_ignore);
+				client->read_wait_ignorelen = 0;
 				client->read_wait_until = NULL;
 
 				pulsar_client_resume(client, client->rL, 1);

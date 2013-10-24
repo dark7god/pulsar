@@ -11,7 +11,7 @@ local serv, err = loop:tcpServer("127.0.0.1", 2260, function(client)
 	local str = ""
 	local stradd = string.rep("a", 1000)
 	print("Start ...")
-	for i = 1, 3000 do
+	for i = 1, 300 do
 		str = str .. stradd
 		longtask:split()
 	end
@@ -20,9 +20,12 @@ local serv, err = loop:tcpServer("127.0.0.1", 2260, function(client)
 	client:send("lolzor", true)
 	client:send("lolzor", true)
 	client:send("lolzor", true)
-	client:send("lolzor")
+	client:send("lolzor\n")
 
-	while client:connected() do client:read(1) client:send("you press!\n") end
+	while client:connected() do
+		local line = client:readUntil('\n', 'aze')
+		client:send("got '"..tostring(line).."'\n")
+	end
 
 	print("== Coroutine for client end", client)
 end)
