@@ -43,30 +43,6 @@ typedef struct
 	int co_ref;
 } pulsar_idle;
 
-struct pulsar_tcp_client_send_chain
-{
-	lua_State *sL;
-	bool send_buf_nowait;
-	char *send_buf;
-	size_t send_buf_len;
-
-	struct pulsar_tcp_client_send_chain *next;
-};
-typedef struct pulsar_tcp_client_send_chain pulsar_tcp_client_send_chain;
-
-typedef struct
-{
-	struct ev_idle w_timeout;
-	
-	pulsar_loop *loop;
-
-	lua_State *L;
-
-	bool active;
-	bool first_run;
-	int co_ref;
-} pulsar_idle_worker;
-
 /**************************************************************************************
  ** Timers
  **************************************************************************************/
