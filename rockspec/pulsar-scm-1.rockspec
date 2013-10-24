@@ -2,7 +2,8 @@ package = "pulsar"
 version = "scm-1"
 
 source = {
-	url = "git@github.com:dark7god/pulsar.git"
+	url = "git://github.com/dark7god/pulsar.git",
+	branch = "master",
 }
 
 description = {
@@ -28,12 +29,12 @@ external_dependencies = {
 build = {
 	type = "builtin",
 	modules = {
-		ev = {
+		pulsar = {
 			sources = {
 				"src/pulsar.c"
 			},
 			libraries = {
-				"pulsar"
+				"ev"
 			}
 		}
 	}
