@@ -688,6 +688,21 @@ static void idle_worker_cb(struct ev_loop *loop, ev_idle *_watcher, int revents)
 /**************************************************************************************
  ** Loop calls
  **************************************************************************************/
+static int main_loop_ref = LUA_NOREF;
+static int pulsar_loop_default(lua_State *L)
+{
+	if (main_loop_ref == LUA_NOREF) {
+		pulsar_loop *loop = (pulsar_loop*)lua_newuserdata(L, sizeof(pulsar_loop));
+		pulsar_setmeta(L, MT_PULSAR_LOOP);
+		loop->loop = ev_default_loop(0);
+		lua_pushvalue(L, -1);
+		main_loop_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+	} else {
+		lua_rawgeti(L, LUA_REGISTRYINDEX, main_loop_ref);
+	}
+	return 1;
+}
+
 static int pulsar_loop_new(lua_State *L)
 {
 	pulsar_loop *loop = (pulsar_loop*)lua_newuserdata(L, sizeof(pulsar_loop));
@@ -964,6 +979,7 @@ static const struct luaL_reg meth_pulsar_tcp_client[] =
 
 static const struct luaL_reg pulsarlib[] =
 {
+	{"defaultLoop", pulsar_loop_default},
 	{"newLoop", pulsar_loop_new},
 	{NULL, NULL},
 };

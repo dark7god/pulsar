@@ -1,6 +1,9 @@
 local pulsar = require 'pulsar'
 
-local loop = pulsar.newLoop()
+local loop = pulsar.defaultLoop()
+local loop2 = pulsar.defaultLoop()
+local loop3 = pulsar.defaultLoop()
+print(loop, loop2, loop3)
 
 local longtask = loop:longTask()
 
