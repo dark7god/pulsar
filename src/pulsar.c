@@ -71,12 +71,14 @@ static void pulsar_client_resume(pulsar_tcp_client *client, lua_State *L, int na
 	int ret = lua_resume(L, nargs);
 	// More to do
 	if (ret == LUA_YIELD) return;
+	if (client->standalone) return;
 
 	// Finished, end the client
 	if (!ret) {
 		ev_io_stop(client->loop->loop, &client->w_read);
 		ev_io_stop(client->loop->loop, &client->w_send);
 		client->active = false;
+		traceback(L);
 		client->disconnected = true;
 		close(client->fd);
 		client->fd = 0;
@@ -469,6 +471,8 @@ static void tcp_server_accept_cb(struct ev_loop *loop, struct ev_io *_watcher, i
 	ev_io_init(&client->w_read, tcp_client_read_cb, fd, EV_READ);
 	ev_io_init(&client->w_send, tcp_client_send_cb, fd, EV_WRITE);
 
+	client->read_wait_ignorelen = 0;
+	client->read_wait_ignore = NULL;
 	client->read_wait_len = 0;
 	client->read_wait_until = NULL;
 	client->read_buf_pos = 0;
@@ -479,6 +483,8 @@ static void tcp_server_accept_cb(struct ev_loop *loop, struct ev_io *_watcher, i
 	client->send_buf_len = 0;
 	client->send_buf = NULL;
 	client->send_buf_chain = NULL;
+
+	client->standalone = false;
 
 	lua_State *L = lua_newthread(serv->L);
 	lua_pushvalue(serv->L, -1);
@@ -834,6 +840,8 @@ static int pulsar_tcp_client_new(lua_State *L)
 	ev_io_init(&client->w_read, tcp_client_read_cb, fd, EV_READ);
 	ev_io_init(&client->w_send, tcp_client_send_cb, fd, EV_WRITE);
 
+	client->read_wait_ignorelen = 0;
+	client->read_wait_ignore = NULL;
 	client->read_wait_len = 0;
 	client->read_wait_until = NULL;
 	client->read_buf_pos = 0;
@@ -844,6 +852,8 @@ static int pulsar_tcp_client_new(lua_State *L)
 	client->send_buf_len = 0;
 	client->send_buf = NULL;
 	client->send_buf_chain = NULL;
+
+	client->standalone = true;
 
 	return 1;
 }

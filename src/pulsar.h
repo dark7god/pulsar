@@ -111,6 +111,7 @@ typedef struct
 
 	pulsar_loop *loop;
 
+	bool standalone;
 	int fd;
 
 	int co_ref;
