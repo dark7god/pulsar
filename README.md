@@ -53,6 +53,7 @@ server:start()
 
 Create a tcp server on given host (use 0.0.0.0 to bind on all IPs) and port.
 When a new connection arrives a coroutine is spawned running the handler function which is passed a ***TCP Client***.
+The client will be properly closed when the function ends.
 
 ***server:start()***
 
@@ -81,6 +82,10 @@ It must be used in a coroutine for most methods to work.
 Let incomming data be read into the client's buffer.
 You must call this before any read() calls.
 
+***client:stopRead()***
+
+Stop receiving any more data.
+
 ***data, err = client:read(nb)***
 
 Read nb bytes.
@@ -91,3 +96,27 @@ This will block the coroutine until exactly nb bytes are available.
 Read bytes until until_string is found.
 This will block the coroutine until data is found.
 Returns the data without the until_string and if given without ignore_string at the end.
+
+***ok = client:send(data, noblock)***
+
+Send data and block until it finishes.
+If noblock is set it will not block.
+If multiple calls are made with noblock and then one with blocking it will wait until all is finished.
+
+***is_connected = client:connected()***
+
+Returns a boolean indicating if we are still connected to the other side.
+
+***has_data = client:hasData()***
+
+Return a boolean indicating there is data to be read in the buffer.
+
+***ip = client:getpeername()***
+
+Returns a string containing the IP of the other side.
+
+
+***client:close()***
+
+Closes the connection to the other side.
+
