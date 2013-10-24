@@ -50,8 +50,44 @@ server:start()
 ```
 
 ***server = loop:tcpServer(host, port, handler_function)***
+
+Create a tcp server on given host (use 0.0.0.0 to bind on all IPs) and port.
+When a new connection arrives a coroutine is spawned running the handler function which is passed a ***TCP Client***.
+
 ***server:start()***
+
 Let the server start accepting connections.
 
 ***server:stop()***
+
 Stop the server from accepting any more connections.
+
+TCP Client
+==========
+```lua
+client:startRead()
+client:read(10)
+client:readUntil('\n'
+client:send("Hellow world")
+```
+
+***client = loop:tcpClient(host, port)***
+
+Create a tcp client to the given host and port.
+It must be used in a coroutine for most methods to work.
+
+***client:startRead()***
+
+Let incomming data be read into the client's buffer.
+You must call this before any read() calls.
+
+***data, err = client:read(nb)***
+
+Read nb bytes.
+This will block the coroutine until exactly nb bytes are available.
+
+***data, err = client:readUntil(until_string, ignore_string)***
+
+Read bytes until until_string is found.
+This will block the coroutine until data is found.
+Returns the data without the until_string and if given without ignore_string at the end.
