@@ -221,6 +221,7 @@ static void tcp_client_send_cb(struct ev_loop *loop, struct ev_io *_watcher, int
 
 	if (client->send_buf_pos >= client->send_buf_len) {
 		bool nowait = client->send_buf_nowait;
+		size_t sent_len = client->send_buf_len;
 		client->send_buf_len = 0;
 		free(client->send_buf);
 		client->send_buf = NULL;
@@ -239,7 +240,7 @@ static void tcp_client_send_cb(struct ev_loop *loop, struct ev_io *_watcher, int
 		else ev_io_stop(loop, &client->w_send);
 
 		if (!nowait) {
-			lua_pushboolean(client->sL, true);
+			lua_pushnumber(client->sL, sent_len);
 			pulsar_client_resume(client, client->sL, 1);
 		}
 		return;
