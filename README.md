@@ -68,7 +68,7 @@ TCP Client
 ```lua
 client:startRead()
 client:read(10)
-client:readUntil('\n'
+client:readUntil('\n')
 client:send("Hellow world")
 ```
 
