@@ -319,7 +319,7 @@ static int pulsar_tcp_client_read_until(lua_State *L) {
 	client->read_wait_len = WAIT_LEN_UNTIL;
 	client->read_wait_until = strdup(until);
 	client->read_wait_ignorelen = ignorelen;
-	client->read_wait_ignore = strdup(ignore);
+	if (ignorelen) client->read_wait_ignore = strdup(ignore);
 	return lua_yield(L, 0);
 }
 
