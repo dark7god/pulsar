@@ -24,7 +24,9 @@ loop:run()
 
 Compilation
 ===========
-Very basic for now, just alter src/Makefile if needed and run make
+Very basic for now, just alter src/Makefile if needed and run make.
+
+Or simply using luarocks: *luarocks install https://raw.github.com/dark7god/pulsar/master/rockspec/pulsar-scm-1.rockspec*
 
 API
 ===
