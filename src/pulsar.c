@@ -950,6 +950,7 @@ static const struct luaL_reg meth_pulsar_tcp_client[] =
 {
 	{"startRead", pulsar_tcp_client_start},
 	{"stopRead", pulsar_tcp_client_stop},
+	{"recv", pulsar_tcp_client_read},
 	{"read", pulsar_tcp_client_read},
 	{"readUntil", pulsar_tcp_client_read_until},
 	{"send", pulsar_tcp_client_send},
