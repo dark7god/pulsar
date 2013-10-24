@@ -120,3 +120,89 @@ Returns a string containing the IP of the other side.
 
 Closes the connection to the other side.
 
+
+Timer
+=====
+```lua
+local timer = loop:timer(10, 1, function(timer) while true do
+	print("Hello")
+	timer:next()
+end end)
+timer:start()
+```
+
+Timers resume their coroutine after a first time and then repeatedly, this means the function passed to the timer must not exit (if it does the timer is deleted).
+
+***timer = loop:timer(first, repeat, handler)***
+
+Creates a timer that, once started, will fire in _first_ seconds and then every _repeat_ seconds. Reapeat time can be 0 to not repeat and decimal seconds can be given.
+
+***timer:start()***
+
+Starts the timer.
+
+***timer:stop()***
+
+Stops the timer.
+
+***timer:next()***
+
+Pause the coroutine, indicating we are finished with this iteration.
+
+
+Idler
+=====
+```lua
+local idle = loop:idle(function(idle) while true do
+	print("I'm so idle...")
+	idle:next()
+end end)
+idle:start()
+```
+
+Idlers resume their coroutine each time the system has nothing beter to do, this means the function passed to the idler must not exit (if it does the idler is deleted).
+
+***idle = loop:idle(handler)***
+
+Creates a idle that, once started, will fire when the system is not busy.
+
+***idle:start()***
+
+Starts the idle.
+
+***idle:stop()***
+
+Stops the idle.
+
+***idle:next()***
+
+Pause the coroutine, indicating we are finished with this iteration.
+
+
+Long Task
+=========
+```lua
+local longtask = loop:longTask()
+
+...inside a coroutine...
+	local str = ""
+	local stradd = string.rep("a", 1000)
+	print("Start ...")
+	for i = 1, 300 do
+		str = str .. stradd
+		longtask:split()
+	end
+```
+
+Long tasks allow you to split time consuming tasks into many small fragments, so that they do not block the application.
+Split code must be running in a coroutine.
+
+You probably only need one longtask object in your application since it can split as many simultaneous tasks as you want.
+
+***longtask = loop:longTask()***
+
+Creates a long task.
+
+***longtask:split()***
+
+Splits the current coroutine, allowing others to run. It will be waken up at the next possible occasion (by an internal idle handler).
