@@ -43,6 +43,23 @@ typedef struct
 	int co_ref;
 } pulsar_idle;
 
+struct pulsar_idle_worker_chain
+{
+	lua_State *L;
+	struct pulsar_idle_worker_chain *next;
+};
+typedef struct pulsar_idle_worker_chain pulsar_idle_worker_chain;
+
+typedef struct
+{
+	struct ev_idle w_timeout;
+	
+	pulsar_loop *loop;
+
+	bool active;
+	pulsar_idle_worker_chain *chain;
+} pulsar_idle_worker;
+
 /**************************************************************************************
  ** Timers
  **************************************************************************************/

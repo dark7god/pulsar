@@ -1,16 +1,21 @@
-local str = ""
-local stradd = string.rep("a", 1000)
-print("Start ...")
-for i = 1, 3000 do str = str .. stradd end
-print("Started!")
-
 local pulsar = require 'pulsar'
 
 local loop = pulsar.newLoop()
 
+local longtask = loop:longTask()
+
 local serv, err = loop:tcpServer("127.0.0.1", 2260, function(client)
 	print("== Coroutine for client running", client:getpeername())
 	client:startRead()
+
+	local str = ""
+	local stradd = string.rep("a", 1000)
+	print("Start ...")
+	for i = 1, 3000 do
+		str = str .. stradd
+		longtask:split()
+	end
+	print("Started!")
 
 	client:send("lolzor", true)
 	client:send("lolzor", true)
@@ -25,7 +30,7 @@ if not serv then return print(err) end
 collectgarbage("collect")
 serv:start()
 
-local loltimer = loop:timer(1, 1, function(timer) while true do
+local loltimer = loop:timer(0.3, 0.3, function(timer) while true do
 	print("lol!")
 
 	timer:next()

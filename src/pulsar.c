@@ -40,6 +40,7 @@ static bool set_non_blocking(int fd) {
 #define MT_PULSAR_LOOP		"Pulsar Loop"
 #define MT_PULSAR_TIMER		"Pulsar Timer"
 #define MT_PULSAR_IDLE		"Pulsar Idle"
+#define MT_PULSAR_IDLE_WORKER	"Pulsar Idle Worker"
 #define MT_PULSAR_TCP_SERVER	"Pulsar TCP Server"
 #define MT_PULSAR_TCP_CLIENT	"Pulsar TCP Client"
 
@@ -500,7 +501,6 @@ static int pulsar_timer_close(lua_State *L) {
 	ev_timer_stop(timer->loop->loop, &timer->w_timeout);
 	timer->active = false;
 	luaL_unref(L, LUA_REGISTRYINDEX, timer->co_ref);
-	printf("Closing timer\n");
 	return 0;
 }
 static int pulsar_timer_start(lua_State *L) {
@@ -520,7 +520,7 @@ static int pulsar_timer_next(lua_State *L) {
 	return lua_yield(L, 0);
 }
 
-static void tcp_timer_cb(struct ev_loop *loop, ev_timer *_watcher, int revents) {
+static void timer_cb(struct ev_loop *loop, ev_timer *_watcher, int revents) {
 	if (EV_ERROR & revents) return;
 
 	pulsar_timer *timer = (pulsar_timer *)_watcher;
@@ -563,7 +563,6 @@ static int pulsar_idle_close(lua_State *L) {
 	ev_idle_stop(idle->loop->loop, &idle->w_timeout);
 	idle->active = false;
 	luaL_unref(L, LUA_REGISTRYINDEX, idle->co_ref);
-	printf("Closing idle\n");
 	return 0;
 }
 static int pulsar_idle_start(lua_State *L) {
@@ -583,7 +582,7 @@ static int pulsar_idle_next(lua_State *L) {
 	return lua_yield(L, 0);
 }
 
-static void tcp_idle_cb(struct ev_loop *loop, ev_idle *_watcher, int revents) {
+static void idle_cb(struct ev_loop *loop, ev_idle *_watcher, int revents) {
 	if (EV_ERROR & revents) return;
 
 	pulsar_idle *idle = (pulsar_idle *)_watcher;
@@ -594,6 +593,80 @@ static void tcp_idle_cb(struct ev_loop *loop, ev_idle *_watcher, int revents) {
 	} else {
 		pulsar_idle_resume(idle, idle->L, 0);
 	}
+}
+
+/**************************************************************************************
+ ** Idle Workers
+ **************************************************************************************/
+static void pulsar_idle_worker_resume(pulsar_idle_worker *idle_worker, lua_State *L, int nargs) {
+	int ret = lua_resume(L, nargs);
+	// More to do
+	if (ret == LUA_YIELD) return;
+
+	// Finished, end the idle_worker
+	if (!ret) {
+		ev_idle_stop(idle_worker->loop->loop, &idle_worker->w_timeout);
+		idle_worker->active = false;
+		return;
+	}
+
+	if (ret == LUA_ERRRUN) {
+		printf("Error while running idle_worker's coroutine: %s\n", lua_tostring(L, -1));
+		traceback(L);
+
+		ev_idle_stop(idle_worker->loop->loop, &idle_worker->w_timeout);
+		idle_worker->active = false;
+		return;
+	}
+}
+
+static int pulsar_idle_worker_close(lua_State *L) {
+	pulsar_idle_worker *idle_worker = (pulsar_idle_worker *)luaL_checkudata (L, 1, MT_PULSAR_IDLE_WORKER);
+	ev_idle_stop(idle_worker->loop->loop, &idle_worker->w_timeout);
+	idle_worker->active = false;
+	while (idle_worker->chain) {
+		pulsar_idle_worker_chain *chain = idle_worker->chain;
+		idle_worker->chain = idle_worker->chain->next;
+
+		free(chain);
+	}
+	return 0;
+}
+static int pulsar_idle_worker_split(lua_State *L) {
+	pulsar_idle_worker *idle_worker = (pulsar_idle_worker *)luaL_checkudata (L, 1, MT_PULSAR_IDLE_WORKER);
+	ev_idle_start(idle_worker->loop->loop, &idle_worker->w_timeout);
+	idle_worker->active = true;
+
+	pulsar_idle_worker_chain *chain = malloc(sizeof(pulsar_idle_worker_chain));
+	lua_pushthread(L); chain->L = lua_tothread(L, -1); lua_pop(L, 1);
+	chain->next = NULL;
+
+	if (!idle_worker->chain) idle_worker->chain = chain;
+	else {
+		pulsar_idle_worker_chain *tail = idle_worker->chain;
+		while (tail->next) tail = tail->next;
+		tail->next = chain;
+	}
+
+	return lua_yield(L, 0);
+}
+
+static void idle_worker_cb(struct ev_loop *loop, ev_idle *_watcher, int revents) {
+	if (EV_ERROR & revents) return;
+
+	pulsar_idle_worker *idle_worker = (pulsar_idle_worker *)_watcher;
+	if (!idle_worker->chain) {
+		ev_idle_stop(idle_worker->loop->loop, &idle_worker->w_timeout);
+		idle_worker->active = false;
+		return;
+	}
+
+	pulsar_idle_worker_chain *chain = idle_worker->chain;
+	idle_worker->chain = idle_worker->chain->next;
+	lua_State *rL = chain->L;
+	free(chain);
+
+	pulsar_idle_worker_resume(idle_worker, rL, 0);
 }
 
 /**************************************************************************************
@@ -765,7 +838,7 @@ static int pulsar_timer_new(lua_State *L)
 
 	timer->co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
-	ev_timer_init(&timer->w_timeout, tcp_timer_cb, first, repeat);
+	ev_timer_init(&timer->w_timeout, timer_cb, first, repeat);
 	return 1;
 }
 
@@ -789,7 +862,22 @@ static int pulsar_idle_new(lua_State *L)
 
 	idle->co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
-	ev_idle_init(&idle->w_timeout, tcp_idle_cb);
+	ev_idle_init(&idle->w_timeout, idle_cb);
+	return 1;
+}
+
+static int pulsar_idle_worker_new(lua_State *L)
+{
+	pulsar_loop *loop = (pulsar_loop *)luaL_checkudata (L, 1, MT_PULSAR_LOOP);
+
+	// Initialize and start a watcher to accepts client requests
+	pulsar_idle_worker *idle = (pulsar_idle_worker*)lua_newuserdata(L, sizeof(pulsar_idle_worker));
+	pulsar_setmeta(L, MT_PULSAR_IDLE_WORKER);
+	idle->loop = loop;
+	idle->active = false;
+	idle->chain = NULL;
+
+	ev_idle_init(&idle->w_timeout, idle_worker_cb);
 	return 1;
 }
 
@@ -804,6 +892,7 @@ static const struct luaL_reg meth_pulsar_loop[] =
 	{"tcpClient", pulsar_tcp_client_new},
 	{"timer", pulsar_timer_new},
 	{"idle", pulsar_idle_new},
+	{"longTask", pulsar_idle_worker_new},
 	{"close", pulsar_loop_close},
 	{"__gc", pulsar_loop_close},
 	{NULL, NULL},
@@ -824,6 +913,13 @@ static const struct luaL_reg meth_pulsar_idle[] =
 	{"next", pulsar_idle_next},
 	{"close", pulsar_idle_close},
 	{"__gc", pulsar_idle_close},
+	{NULL, NULL},
+};
+static const struct luaL_reg meth_pulsar_idle_worker[] =
+{
+	{"split", pulsar_idle_worker_split},
+	{"close", pulsar_idle_worker_close},
+	{"__gc", pulsar_idle_worker_close},
 	{NULL, NULL},
 };
 static const struct luaL_reg meth_pulsar_tcp_server[] =
@@ -896,6 +992,7 @@ int luaopen_pulsar(lua_State *L)
 	pulsar_createmeta(L, MT_PULSAR_LOOP, meth_pulsar_loop);
 	pulsar_createmeta(L, MT_PULSAR_TIMER, meth_pulsar_timer);
 	pulsar_createmeta(L, MT_PULSAR_IDLE, meth_pulsar_idle);
+	pulsar_createmeta(L, MT_PULSAR_IDLE_WORKER, meth_pulsar_idle_worker);
 	pulsar_createmeta(L, MT_PULSAR_TCP_SERVER, meth_pulsar_tcp_server);
 	pulsar_createmeta(L, MT_PULSAR_TCP_CLIENT, meth_pulsar_tcp_client);
 
