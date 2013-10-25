@@ -39,7 +39,7 @@ build = {
 				"src/resolve.c",
 			},
 			libraries = {
-				"ev"
+				"ev", "eio",
 			}
 		}
 	}
