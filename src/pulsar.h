@@ -15,9 +15,17 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <ev.h>
+#include <eio.h>
 #include <lua.h>
 #include <lauxlib.h>
 #include <lualib.h>
+
+#define MT_PULSAR_LOOP		"Pulsar Loop"
+#define MT_PULSAR_TIMER		"Pulsar Timer"
+#define MT_PULSAR_IDLE		"Pulsar Idle"
+#define MT_PULSAR_IDLE_WORKER	"Pulsar Idle Worker"
+#define MT_PULSAR_TCP_SERVER	"Pulsar TCP Server"
+#define MT_PULSAR_TCP_CLIENT	"Pulsar TCP Client"
 
 /**************************************************************************************
  ** Loop
@@ -134,5 +142,8 @@ typedef struct
 	size_t send_buf_len, send_buf_pos;
 	pulsar_tcp_client_send_chain *send_buf_chain;
 } pulsar_tcp_client;
+
+extern void pulsar_eio_init(struct ev_loop *loop);
+extern int pulsar_resolve_dns(lua_State *L);
 
 #endif

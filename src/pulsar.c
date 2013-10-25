@@ -36,14 +36,6 @@ static bool set_non_blocking(int fd) {
 }
 
 #define DEFAULT_BUFFER_SIZE	1024
-
-#define MT_PULSAR_LOOP		"Pulsar Loop"
-#define MT_PULSAR_TIMER		"Pulsar Timer"
-#define MT_PULSAR_IDLE		"Pulsar Idle"
-#define MT_PULSAR_IDLE_WORKER	"Pulsar Idle Worker"
-#define MT_PULSAR_TCP_SERVER	"Pulsar TCP Server"
-#define MT_PULSAR_TCP_CLIENT	"Pulsar TCP Client"
-
 #define WAIT_LEN_UNTIL		-1
 
 /*
@@ -702,6 +694,7 @@ static int pulsar_loop_default(lua_State *L)
 		pulsar_loop *loop = (pulsar_loop*)lua_newuserdata(L, sizeof(pulsar_loop));
 		pulsar_setmeta(L, MT_PULSAR_LOOP);
 		loop->loop = ev_default_loop(0);
+		pulsar_eio_init(loop->loop);
 		lua_pushvalue(L, -1);
 		main_loop_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 	} else {
@@ -935,6 +928,7 @@ static const struct luaL_reg meth_pulsar_loop[] =
 	{"timer", pulsar_timer_new},
 	{"idle", pulsar_idle_new},
 	{"longTask", pulsar_idle_worker_new},
+	{"resolve", pulsar_resolve_dns},
 	{"close", pulsar_loop_close},
 	{"__gc", pulsar_loop_close},
 	{NULL, NULL},

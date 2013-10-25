@@ -1,9 +1,6 @@
 local pulsar = require 'pulsar'
 
 local loop = pulsar.defaultLoop()
-local loop2 = pulsar.defaultLoop()
-local loop3 = pulsar.defaultLoop()
-print(loop, loop2, loop3)
 
 local longtask = loop:longTask()
 
@@ -37,7 +34,9 @@ collectgarbage("collect")
 serv:start()
 
 local loltimer = loop:timer(0.3, 0.3, function(timer) while true do
-	print("lol!")
+	print("lol1!")
+	print("===", loop:resolve("google.com"))
+	print("lol2!")
 
 	timer:next()
 	collectgarbage("collect")
