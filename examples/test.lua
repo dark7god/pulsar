@@ -4,6 +4,7 @@ local loop = pulsar.defaultLoop()
 
 local longtask = loop:longTask()
 
+local c
 local serv, err = loop:tcpServer("127.0.0.1", 2260, function(client)
 	print("== Coroutine for client running", client:getpeername())
 	client:startRead()
@@ -21,6 +22,7 @@ local serv, err = loop:tcpServer("127.0.0.1", 2260, function(client)
 	client:send("lolzor", true)
 	client:send("lolzor", true)
 	client:send("lolzor\n")
+	c = client
 
 	while client:connected() do
 		local line = client:readUntil('\n', '\r')
@@ -33,23 +35,12 @@ if not serv then return print(err) end
 collectgarbage("collect")
 serv:start()
 
-local loltimer = loop:timer(0.3, 0.3, function(timer) while true do
-	print("lol1!")
-	print("===", loop:resolve("google.com"))
-	print("lol2!")
-
+local loltimer = loop:timer(4, 4, function(timer) while true do
+	if c then
+		c:close()
+	end
 	timer:next()
-	collectgarbage("collect")
 end end)
-collectgarbage("collect")
 loltimer:start()
-
-local idle = loop:idle(function(idle) while true do
---	print("idling...")
-	collectgarbage("collect")
-	idle:next()
-end end)
-collectgarbage("collect")
-idle:start()
 
 loop:run()

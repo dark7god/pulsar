@@ -100,6 +100,24 @@ static int pulsar_tcp_client_close(lua_State *L) {
 	client->active = false;
 	client->disconnected = true;
 	if (client->fd) close(client->fd);
+
+	// Resume waiting coroutines so that they can fail
+	if (client->send_buf_len && !client->send_buf_nowait) {
+		client->send_buf_len = 0;
+		printf("resuming dying send\n");
+		lua_pushnumber(client->sL, 0);
+		pulsar_client_resume(client, client->sL, 1);
+	}
+
+	// Resume waiting coroutines so that they can fail
+	if (client->read_wait_len) {
+		client->read_wait_len = 0;
+		printf("resuming dying read\n");
+		lua_pushnil(client->rL);
+		lua_pushliteral(client->rL, "disconnected");
+		pulsar_client_resume(client, client->rL, 2);
+	}
+
 	if (client->read_buf) free(client->read_buf);
 	client->read_buf = NULL;
 	client->send_buf_pos = 0;
@@ -217,6 +235,7 @@ static void tcp_client_send_cb(struct ev_loop *loop, struct ev_io *_watcher, int
 		bool nowait = client->send_buf_nowait;
 		size_t sent_len = client->send_buf_len;
 		client->send_buf_len = 0;
+		client->send_buf_nowait = false;
 		free(client->send_buf);
 		client->send_buf = NULL;
 
