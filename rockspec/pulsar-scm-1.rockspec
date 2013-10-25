@@ -35,8 +35,8 @@ build = {
 	modules = {
 		pulsar = {
 			sources = {
-				"src/pulsar.c"
-				"src/resolve.c"
+				"src/pulsar.c",
+				"src/resolve.c",
 			},
 			libraries = {
 				"ev"
