@@ -207,14 +207,16 @@ static void tcp_client_send_cb(struct ev_loop *loop, struct ev_io *_watcher, int
 
 	ssize_t len = write(client->fd, client->send_buf + client->send_buf_pos, client->send_buf_len - client->send_buf_pos);
 
-	if ((len < 0) && (errno != EAGAIN) && (errno != EWOULDBLOCK))
+	if (len < 0)
 	{
-		client->send_buf_len = 0;
-		free(client->send_buf);
-		ev_io_stop(loop, &client->w_send);
-		client->disconnected = true;
-		lua_pushboolean(client->sL, false);
-		pulsar_client_resume(client, client->sL, 1);
+		if ((errno != EAGAIN) && (errno != EWOULDBLOCK)) {
+			client->send_buf_len = 0;
+			free(client->send_buf);
+			ev_io_stop(loop, &client->w_send);
+			client->disconnected = true;
+			lua_pushboolean(client->sL, false);
+			pulsar_client_resume(client, client->sL, 1);
+		}
 		return;
 	}
 
@@ -278,7 +280,7 @@ static int pulsar_tcp_client_read(lua_State *L) {
 	if (len <= client->read_buf_pos) {
 		lua_pushlstring(L, client->read_buf, len);
 		char *newbuf = malloc(client->read_buf_len);
-		if (client->read_buf_pos > len) memcpy(newbuf, client->read_buf + len, client->read_buf_pos);
+		if (client->read_buf_pos > len) memcpy(newbuf, client->read_buf + len, client->read_buf_pos - len);
 		free(client->read_buf);
 		client->read_buf = newbuf;
 		client->read_buf_pos -= len;
@@ -319,7 +321,7 @@ static int pulsar_tcp_client_read_until(lua_State *L) {
 				else
 					lua_pushlstring(L, client->read_buf, pos);
 				char *newbuf = malloc(client->read_buf_len);
-				if (client->read_buf_pos > pos + len) memcpy(newbuf, client->read_buf + pos + len, client->read_buf_pos);
+				if (client->read_buf_pos > pos + len) memcpy(newbuf, client->read_buf + pos + len, client->read_buf_pos - pos - len);
 				free(client->read_buf);
 				client->read_buf = newbuf;
 				client->read_buf_pos -= pos + len;
@@ -352,14 +354,16 @@ static void tcp_client_read_cb(struct ev_loop *loop, struct ev_io *_watcher, int
 
 	ssize_t read = recv(client->fd, client->read_buf + client->read_buf_pos, client->read_buf_len - client->read_buf_pos, 0);
 
-	if ((read < 0) && (errno != EAGAIN) && (errno != EWOULDBLOCK))
+	if (read < 0)
 	{
-		ev_io_stop(loop, &client->w_read);
-		client->active = false;
-		client->disconnected = true;
-		lua_pushnil(client->rL);
-		lua_pushliteral(client->rL, "disconnected");
-		pulsar_client_resume(client, client->rL, 2);
+		if ((errno != EAGAIN) && (errno != EWOULDBLOCK)) {
+			ev_io_stop(loop, &client->w_read);
+			client->active = false;
+			client->disconnected = true;
+			lua_pushnil(client->rL);
+			lua_pushliteral(client->rL, "disconnected");
+			pulsar_client_resume(client, client->rL, 2);
+		}
 		return;
 	}
 
@@ -375,19 +379,20 @@ static void tcp_client_read_cb(struct ev_loop *loop, struct ev_io *_watcher, int
 	}
 	client->read_buf_pos += read;
 
-	if ((client->read_wait_len > 0) && (client->read_buf_pos >= client->read_wait_len)) {
+	if ((client->read_buf_pos) && (client->read_wait_len > 0) && (client->read_buf_pos >= client->read_wait_len)) {
 		lua_pushlstring(client->rL, client->read_buf, client->read_wait_len);
 		char *newbuf = malloc(client->read_buf_len);
-		if (client->read_buf_pos > client->read_wait_len) memcpy(newbuf, client->read_buf + client->read_wait_len, client->read_buf_pos);
+		if (client->read_buf_pos > client->read_wait_len) memcpy(newbuf, client->read_buf + client->read_wait_len, client->read_buf_pos - client->read_wait_len);
 		free(client->read_buf);
 		client->read_buf = newbuf;
 		client->read_buf_pos -= client->read_wait_len;
 		client->read_wait_len = 0;
 
 		pulsar_client_resume(client, client->rL, 1);
+		return;
 	}
 
-	if (client->read_wait_len == WAIT_LEN_UNTIL) {
+	if ((client->read_buf_pos) && (client->read_wait_len == WAIT_LEN_UNTIL)) {
 		size_t len = strlen(client->read_wait_until);
 		const char *until = client->read_wait_until;
 		size_t ignorelen = client->read_wait_ignorelen;
@@ -401,7 +406,7 @@ static void tcp_client_read_cb(struct ev_loop *loop, struct ev_io *_watcher, int
 					lua_pushlstring(client->rL, client->read_buf, pos);
 
 				char *newbuf = malloc(client->read_buf_len);
-				if (client->read_buf_pos > pos + len) memcpy(newbuf, client->read_buf + pos + len, client->read_buf_pos);
+				if (client->read_buf_pos > pos + len) memcpy(newbuf, client->read_buf + pos + len, client->read_buf_pos - pos - len);
 				free(client->read_buf);
 				client->read_buf = newbuf;
 				client->read_buf_pos -= pos + len;
