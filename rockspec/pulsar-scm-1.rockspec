@@ -23,11 +23,11 @@ external_dependencies = {
 	LIBEV = {
 		header = "ev.h",
 		library = "libev.so"
-	}
+	},
 	LIBEIO = {
 		header = "eio.h",
 		library = "libeio.so"
-	}
+	},
 }
 
 build = {
