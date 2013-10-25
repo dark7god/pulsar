@@ -24,6 +24,10 @@ external_dependencies = {
 		header = "ev.h",
 		library = "libev.so"
 	}
+	LIBEIO = {
+		header = "eio.h",
+		library = "libeio.so"
+	}
 }
 
 build = {
@@ -32,6 +36,7 @@ build = {
 		pulsar = {
 			sources = {
 				"src/pulsar.c"
+				"src/resolve.c"
 			},
 			libraries = {
 				"ev"
