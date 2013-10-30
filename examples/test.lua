@@ -1,46 +1,54 @@
+local print = function(...) print(...) return ... end
 local pulsar = require 'pulsar'
 
 local loop = pulsar.defaultLoop()
 
-local longtask = loop:longTask()
+local worker = loop:worker()
 
-local c
-local serv, err = loop:tcpServer("127.0.0.1", 2260, function(client)
+worker:register(function() print("lol worker") end)
+
+local serv, err = loop:tcpServer("127.0.0.1", 3000, function(client)
 	print("== Coroutine for client running", client:getpeername())
-	client:startRead()
+
+	worker:register(function()
+		print("=== google register")
+		local google = print(loop:tcpClient("127.0.0.1", 3001))
+		if google then
+			google:startRead()
+			print("==google== start read")
+			google:send("GET / HTTP/1.1\r\nHost: google.com\r\n\r\n")
+			print("==google== sent")
+			print("==google==", google:readUntil('\n'))
+		end
+	end)
 
 	local str = ""
-	local stradd = string.rep("a", 1000)
-	print("Start ...")
+	local cat = string.rep("a", 1000)
 	for i = 1, 300 do
-		str = str .. stradd
-		longtask:split()
+		str=str..cat
+		worker:split()
 	end
-	print("Started!")
 
-	client:send("lolzor", true)
-	client:send("lolzor", true)
-	client:send("lolzor", true)
-	client:send("lolzor\n")
-	c = client
-
+	client:startRead()
+	client:send("READY!\n")
 	while client:connected() do
-		local line = client:readUntil('\n', '\r')
-		client:send("got '"..tostring(line).."'\n")
+		print("===", client:readUntil('\n'))
+		client:send("lolzor???\n")
 	end
-
 	print("== Coroutine for client end", client)
 end)
-if not serv then return print(err) end
-collectgarbage("collect")
 serv:start()
 
-local loltimer = loop:timer(4, 4, function(timer) while true do
-	if c then
-		c:close()
-	end
+local timer = loop:timer(0.5, 2, function(timer) while true do
+	print("timer")
 	timer:next()
 end end)
-loltimer:start()
+timer:start()
+
+local idle = loop:idle(function(idle) while true do
+	collectgarbage("collect")
+	idle:next()
+end end)
+idle:start()
 
 loop:run()

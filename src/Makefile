@@ -7,10 +7,10 @@ INSTALL_PREFIX = $(PREFIX)/lib/lua/5.1/
 
 CC	= gcc
 TARGET	= ../pulsar.so
-OBJS	= pulsar.o resolve.o
+OBJS	= pulsar.o
 LIBS	=
-CFLAGS	= -I $(LUA_PREFIX)/include -fPIC -ggdb
-LDFLAGS	= -shared -fPIC -lev -leio -ggdb
+CFLAGS	= -I $(LUA_PREFIX)/include -fPIC -ggdb -DDMALLOC -DDMALLOC_FUNC_CHECK -Wall
+LDFLAGS	= -shared -fPIC -luv -ggdb -ldmalloc
 
 default: $(TARGET)
 

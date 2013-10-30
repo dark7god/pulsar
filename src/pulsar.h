@@ -1,6 +1,8 @@
 #ifndef __PULSAR_H__
 #define __PULSAR_H__
 
+#include <error.h>
+#include <assert.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,11 +16,13 @@
 #include <stdio.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <ev.h>
-#include <eio.h>
+#include <uv.h>
 #include <lua.h>
 #include <lauxlib.h>
 #include <lualib.h>
+#ifdef DMALLOC
+#include <dmalloc.h>
+#endif
 
 #define MT_PULSAR_LOOP		"Pulsar Loop"
 #define MT_PULSAR_TIMER		"Pulsar Timer"
@@ -32,7 +36,7 @@
  **************************************************************************************/
 typedef struct
 {
-	struct ev_loop *loop;
+	uv_loop_t *loop;
 } pulsar_loop;
 
 /**************************************************************************************
@@ -40,11 +44,12 @@ typedef struct
  **************************************************************************************/
 typedef struct
 {
-	struct ev_idle w_timeout;
+	uv_idle_t w_timeout;
 	
 	pulsar_loop *loop;
 
 	lua_State *L;
+	int L_ref;
 
 	bool active;
 	bool first_run;
@@ -54,13 +59,15 @@ typedef struct
 struct pulsar_idle_worker_chain
 {
 	lua_State *L;
+	int L_ref;
+	int nargs;
 	struct pulsar_idle_worker_chain *next;
 };
 typedef struct pulsar_idle_worker_chain pulsar_idle_worker_chain;
 
 typedef struct
 {
-	struct ev_idle w_timeout;
+	uv_idle_t w_timeout;
 	
 	pulsar_loop *loop;
 
@@ -73,15 +80,18 @@ typedef struct
  **************************************************************************************/
 typedef struct
 {
-	struct ev_timer w_timeout;
+	uv_timer_t w_timeout;
 	
 	pulsar_loop *loop;
 
 	lua_State *L;
+	int L_ref;
 
 	bool active;
 	bool first_run;
 	int co_ref;
+
+	int timeout, repeat;
 } pulsar_timer;
 
 /**************************************************************************************
@@ -89,41 +99,27 @@ typedef struct
  **************************************************************************************/
 typedef struct
 {
-	struct ev_io w_accept;
+	uv_tcp_t sock;
 	
 	pulsar_loop *loop;
 
 	lua_State *L;
 
-	int fd;
-
 	bool active;
 	int client_fct_ref;
 } pulsar_tcp_server;
 
-struct pulsar_tcp_client_send_chain
-{
-	lua_State *sL;
-	bool send_buf_nowait;
-	char *send_buf;
-	size_t send_buf_len;
-
-	struct pulsar_tcp_client_send_chain *next;
-};
-typedef struct pulsar_tcp_client_send_chain pulsar_tcp_client_send_chain;
-
 typedef struct
 {
-	struct ev_io w_read;
-	struct ev_io w_send;
+	uv_tcp_t *sock;
 
 	pulsar_loop *loop;
 
 	bool standalone;
-	int fd;
 
 	int co_ref;
 
+	bool closed;
 	bool active;
 	bool disconnected;
 
@@ -133,17 +129,36 @@ typedef struct
 	char *read_wait_ignore;
 
 	lua_State *rL;
+	int rL_ref;
 	char *read_buf;
 	size_t read_buf_len, read_buf_pos;
-
-	lua_State *sL;
-	bool send_buf_nowait;
-	char *send_buf;
-	size_t send_buf_len, send_buf_pos;
-	pulsar_tcp_client_send_chain *send_buf_chain;
 } pulsar_tcp_client;
 
-extern void pulsar_eio_init(struct ev_loop *loop);
-extern int pulsar_resolve_dns(lua_State *L);
+typedef struct
+{
+	uv_write_t req;
+
+	uv_buf_t buf;
+
+	pulsar_tcp_client *client;
+
+	lua_State *sL;
+	int sL_ref;
+	int data_ref;
+
+	bool nowait;
+} pulsar_tcp_client_send_chain;
+
+typedef struct
+{
+	uv_connect_t req;
+
+	pulsar_loop *loop;
+
+	uv_tcp_t *sock;
+
+	lua_State *L;
+	int L_ref;
+} pulsar_tcp_client_connect;
 
 #endif

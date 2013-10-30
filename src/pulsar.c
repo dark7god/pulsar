@@ -25,16 +25,6 @@ static void luaL_setfuncs (lua_State *L, const luaL_Reg *l, int nup) {
 }
 #endif
 
-static bool set_non_blocking(int fd) {
-	long on = 1L;
-	if (ioctl(fd, (int)FIONBIO, (char *)&on))
-	{
-		printf("ioctl FIONBIO call failed on %d\n", fd);
-		return false;
-	}
-	return true;
-}
-
 #define DEFAULT_BUFFER_SIZE	1024
 #define WAIT_LEN_UNTIL		-1
 
@@ -56,6 +46,46 @@ static int traceback(lua_State *L) {
 	return 1;
 }
 
+static void stackDump (lua_State *L) {
+	int i=lua_gettop(L);
+	printf(" ----------------  Stack Dump ----------------\n" );
+	while(  i   ) {
+		int t = lua_type(L, i);
+		switch (t) {
+		case LUA_TSTRING:
+			printf("%d:`%s'\n", i, lua_tostring(L, i));
+			break;
+		case LUA_TBOOLEAN:
+			printf("%d: %s\n",i,lua_toboolean(L, i) ? "true" : "false");
+			break;
+		case LUA_TNUMBER:
+			printf("%d: %g\n",  i, lua_tonumber(L, i));
+			break;
+		default:
+			printf("%d: %s // %x\n", i, lua_typename(L, t), (int)lua_topointer(L, i));
+			break;
+		}
+		i--;
+	}
+	printf("--------------- Stack Dump Finished ---------------\n" );
+}
+
+
+static int pulsar_panic(lua_State *L) {
+	printf("OMFG PANIC: %s\n", lua_tostring(L, -1));
+	traceback(L);
+	return 0;
+}
+
+static void buf_alloc(uv_handle_t* tcp, size_t size, uv_buf_t *b) {
+	b->len = size;
+	b->base = (char*)malloc(sizeof(char) * size);
+}
+
+static void buf_free(uv_buf_t *b) {
+	free(b->base);
+}
+
 /**************************************************************************************
  ** TCP Client calls
  **************************************************************************************/
@@ -63,31 +93,27 @@ static void pulsar_client_resume(pulsar_tcp_client *client, lua_State *L, int na
 	int ret = lua_resume(L, nargs);
 	// More to do
 	if (ret == LUA_YIELD) return;
+	if (!client) return;
 	if (client->standalone) return;
 
 	// Finished, end the client
 	if (!ret) {
-		ev_io_stop(client->loop->loop, &client->w_read);
-		ev_io_stop(client->loop->loop, &client->w_send);
+		uv_read_stop((uv_stream_t*)client->sock);
+		if (!client->closed) uv_close((uv_handle_t*)client->sock, NULL);
+		client->closed = true;
 		client->active = false;
-		traceback(L);
 		client->disconnected = true;
-		close(client->fd);
-		client->fd = 0;
 		// Let the rest free up by GC
 		return;
 	}
 
 	if (ret == LUA_ERRRUN) {
-		printf("Error while running client's coroutine (fd %d): %s\n", client->fd, lua_tostring(L, -1));
+		printf("Error while running client's coroutine (fd): %s\n", lua_tostring(L, -1));
 		traceback(L);
 
-		ev_io_stop(client->loop->loop, &client->w_read);
-		ev_io_stop(client->loop->loop, &client->w_send);
+		uv_read_stop((uv_stream_t*)client->sock);
 		client->active = false;
 		client->disconnected = true;
-		close(client->fd);
-		client->fd = 0;
 		// Let the rest free up by GC
 		return;
 	}
@@ -95,53 +121,27 @@ static void pulsar_client_resume(pulsar_tcp_client *client, lua_State *L, int na
 
 static int pulsar_tcp_client_close(lua_State *L) {
 	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
-	ev_io_stop(client->loop->loop, &client->w_read);
-	ev_io_stop(client->loop->loop, &client->w_send);
+	uv_read_stop((uv_stream_t*)client->sock);
 	client->active = false;
 	client->disconnected = true;
-	if (client->fd) close(client->fd);
-
-	// Resume waiting coroutines so that they can fail
-	if (client->send_buf_len && !client->send_buf_nowait) {
-		client->send_buf_len = 0;
-		printf("resuming dying send\n");
-		lua_pushnumber(client->sL, 0);
-		pulsar_client_resume(client, client->sL, 1);
-	}
+	if (!client->closed) uv_close((uv_handle_t*)client->sock, NULL);
+	client->closed = true;
 
 	// Resume waiting coroutines so that they can fail
 	if (client->read_wait_len) {
 		client->read_wait_len = 0;
-		printf("resuming dying read\n");
-		lua_pushnil(client->rL);
-		lua_pushliteral(client->rL, "disconnected");
-		pulsar_client_resume(client, client->rL, 2);
+		if (lua_status(client->rL) == LUA_YIELD) {
+			printf("resuming dying read\n");
+			lua_pushnil(client->rL);
+			lua_pushliteral(client->rL, "disconnected");
+			pulsar_client_resume(client, client->rL, 2);
+			luaL_unref(client->rL, LUA_REGISTRYINDEX, client->rL_ref);
+		}
 	}
 
 	if (client->read_buf) free(client->read_buf);
 	client->read_buf = NULL;
-	client->send_buf_pos = 0;
-	if (client->send_buf) free(client->send_buf);
-	while (client->send_buf_chain) {
-		pulsar_tcp_client_send_chain *chain = client->send_buf_chain;
-		client->send_buf_chain = client->send_buf_chain->next;
-		free(chain->send_buf);
-		free(chain);
-	}
-	client->send_buf_chain = NULL;
-	return 0;
-}
-
-static int pulsar_tcp_client_start(lua_State *L) {
-	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
-	ev_io_start(client->loop->loop, &client->w_read);
-	client->active = true;
-	return 0;
-}
-static int pulsar_tcp_client_stop(lua_State *L) {
-	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
-	ev_io_stop(client->loop->loop, &client->w_read);
-	client->active = false;
+	free(client->sock);
 	return 0;
 }
 
@@ -156,220 +156,53 @@ static int pulsar_tcp_client_has_data(lua_State *L) {
 	return 1;
 }
 
+static void tcp_client_send_cb(uv_write_t *_req, int status){
+	pulsar_tcp_client_send_chain *req = (pulsar_tcp_client_send_chain*)_req;
+	pulsar_tcp_client *client = req->client;
+
+	luaL_unref(req->sL, LUA_REGISTRYINDEX, req->data_ref);
+	luaL_unref(req->sL, LUA_REGISTRYINDEX, req->sL_ref);
+	free(req->buf.base);
+
+	if (!req->nowait) {
+		lua_pushnumber(req->sL, req->buf.len);
+		pulsar_client_resume(client, req->sL, 1);
+	}
+
+	free(req);
+}
+
 static int pulsar_tcp_client_send(lua_State *L) {
 	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
 	size_t datalen;
 	const char *data = lua_tolstring(L, 2, &datalen);
 	bool nowait = lua_toboolean(L, 3);
 
-	if (client->send_buf_len) {
-		pulsar_tcp_client_send_chain *chain = malloc(sizeof(pulsar_tcp_client_send_chain));
-		chain->send_buf = malloc(datalen);
-		memcpy(chain->send_buf, data, datalen);
-		chain->send_buf_len = datalen;
-		chain->send_buf_nowait = nowait;
-		lua_pushthread(L); chain->sL = lua_tothread(L, -1); lua_pop(L, 1);
-		chain->next = NULL;
+	pulsar_tcp_client_send_chain *req = (pulsar_tcp_client_send_chain*)malloc(sizeof(pulsar_tcp_client_send_chain));
+	req->client = client;
+	req->buf.len = datalen;
+	req->buf.base = (char*)data;
 
-		if (!client->send_buf_chain) client->send_buf_chain = chain;
-		else {
-			pulsar_tcp_client_send_chain *tail = client->send_buf_chain;
-			while (tail->next) tail = tail->next;
-			tail->next = chain;
-		}
+	uv_write((uv_write_t*)req, (uv_stream_t*)client->sock, &req->buf, 1, tcp_client_send_cb);
 
-		if (nowait) return 0;
-		else return lua_yield(L, 0);
-	}
+	lua_pushthread(L); req->sL = lua_tothread(L, -1); req->sL_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+	req->nowait = nowait;
 
-	ev_io_start(client->loop->loop, &client->w_send);
-
-	lua_pushthread(L); client->sL = lua_tothread(L, -1); lua_pop(L, 1);
-	client->send_buf_nowait = nowait;
-	client->send_buf_len = datalen;
-	client->send_buf_pos = 0;
-	client->send_buf = malloc(datalen);
-	memcpy(client->send_buf, data, datalen);
+	lua_pushvalue(L, 2);
+	req->data_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
 	if (nowait) return 0;
 	else return lua_yield(L, 0);
+	return 0;
 }
 
-static void tcp_client_send_cb(struct ev_loop *loop, struct ev_io *_watcher, int revents){
-	if (EV_ERROR & revents) return;
-
-	pulsar_tcp_client *client = (pulsar_tcp_client *) (((char *)_watcher) - offsetof(pulsar_tcp_client, w_send));
-
-	if ((!client->send_buf_len) || (client->send_buf_pos >= client->send_buf_len)) {
-		ev_io_stop(loop, &client->w_send);
-		return;
-	}
-
-	ssize_t len = write(client->fd, client->send_buf + client->send_buf_pos, client->send_buf_len - client->send_buf_pos);
-
-	if (len < 0)
-	{
-		if ((errno != EAGAIN) && (errno != EWOULDBLOCK)) {
-			client->send_buf_len = 0;
-			free(client->send_buf);
-			ev_io_stop(loop, &client->w_send);
-			client->disconnected = true;
-			lua_pushboolean(client->sL, false);
-			pulsar_client_resume(client, client->sL, 1);
-		}
-		return;
-	}
-
-	if (len == 0)
-	{
-		client->send_buf_len = 0;
-		free(client->send_buf);
-		ev_io_stop(loop, &client->w_send);
-		client->disconnected = true;
-		lua_pushboolean(client->sL, false);
-		pulsar_client_resume(client, client->sL, 1);
-		return;
-	}
-
-	client->send_buf_pos += len;
-
-	if (client->send_buf_pos >= client->send_buf_len) {
-		bool nowait = client->send_buf_nowait;
-		size_t sent_len = client->send_buf_len;
-		client->send_buf_len = 0;
-		client->send_buf_nowait = false;
-		free(client->send_buf);
-		client->send_buf = NULL;
-
-		/* Grab the next if any */
-		if (client->send_buf_chain) {
-			pulsar_tcp_client_send_chain *chain = client->send_buf_chain;
-			client->send_buf_chain = client->send_buf_chain->next;
-
-			client->send_buf_pos = 0;
-			client->send_buf_len = chain->send_buf_len;
-			client->send_buf = chain->send_buf;
-			client->send_buf_nowait = chain->send_buf_nowait;
-			free(chain);
-		}
-		else ev_io_stop(loop, &client->w_send);
-
-		if (!nowait) {
-			lua_pushnumber(client->sL, sent_len);
-			pulsar_client_resume(client, client->sL, 1);
-		}
-		return;
-	}
-}
-
-static int pulsar_tcp_client_read(lua_State *L) {
-	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
-	if (!client->active) {
-		lua_pushnil(L);
-		lua_pushliteral(L, "client read not active");
-		return 2;
-	}
-
-	int len = luaL_checknumber(L, 2);
-	if (len == 0) {
-		lua_pushliteral(L, "");
-		return 1;
-	}
-
-	/* No need to wait, we already have enough data */
-	if (len <= client->read_buf_pos) {
-		lua_pushlstring(L, client->read_buf, len);
-		char *newbuf = malloc(client->read_buf_len);
-		if (client->read_buf_pos > len) memcpy(newbuf, client->read_buf + len, client->read_buf_pos - len);
-		free(client->read_buf);
-		client->read_buf = newbuf;
-		client->read_buf_pos -= len;
-		return 1;
-	}
-
-	lua_pushthread(L); client->rL = lua_tothread(L, -1); lua_pop(L, 1);
-	client->read_wait_len = len;
-	return lua_yield(L, 0);
-}
-
-static int pulsar_tcp_client_read_until(lua_State *L) {
-	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
-	if (!client->active) {
-		lua_pushnil(L);
-		lua_pushliteral(L, "client read not active");
-		return 2;
-	}
-
-	size_t len;
-	const char *until = luaL_checklstring(L, 2, &len);
-	if (len < 1) {
-		lua_pushnil(L);
-		lua_pushliteral(L, "empty until");
-		return 2;
-	}
-	size_t ignorelen = 0;
-	const char *ignore = NULL;
-	if (lua_isstring(L, 3)) ignore = lua_tolstring(L, 3, &ignorelen);
-
-	/* No need to wait, we may have enough data */
-	if (len <= client->read_buf_pos) {
-		size_t pos = 0;
-		while (pos <= client->read_buf_pos - len) {
-			if (!memcmp(client->read_buf + pos, until, len)) {
-				if (ignorelen && (ignorelen <= pos) && !memcmp(client->read_buf + pos - ignorelen, ignore, ignorelen))
-					lua_pushlstring(L, client->read_buf, pos - ignorelen);
-				else
-					lua_pushlstring(L, client->read_buf, pos);
-				char *newbuf = malloc(client->read_buf_len);
-				if (client->read_buf_pos > pos + len) memcpy(newbuf, client->read_buf + pos + len, client->read_buf_pos - pos - len);
-				free(client->read_buf);
-				client->read_buf = newbuf;
-				client->read_buf_pos -= pos + len;
-				return 1;
-			}
-			pos++;
-		}
-	}
-
-	lua_pushthread(L); client->rL = lua_tothread(L, -1); lua_pop(L, 1);
-	client->read_wait_len = WAIT_LEN_UNTIL;
-	client->read_wait_until = strdup(until);
-	client->read_wait_ignorelen = ignorelen;
-	if (ignorelen) client->read_wait_ignore = strdup(ignore);
-	return lua_yield(L, 0);
-}
-
-static void tcp_client_read_cb(struct ev_loop *loop, struct ev_io *_watcher, int revents){
-	if (EV_ERROR & revents) return;
-
-	pulsar_tcp_client *client = (pulsar_tcp_client *)_watcher;
-
-	if (client->read_buf_len - client->read_buf_pos < DEFAULT_BUFFER_SIZE / 4) {
-		char *newbuf = malloc(client->read_buf_len * 2);
-		memcpy(newbuf, client->read_buf, client->read_buf_pos);
-		free(client->read_buf);
-		client->read_buf = newbuf;
-		client->read_buf_len *= 2;
-	}
-
-	ssize_t read = recv(client->fd, client->read_buf + client->read_buf_pos, client->read_buf_len - client->read_buf_pos, 0);
+static void tcp_client_read_cb(uv_stream_t *watcher, ssize_t read, const uv_buf_t *buf){
+	pulsar_tcp_client *client = (pulsar_tcp_client *)watcher->data;
+	luaL_unref(client->rL, LUA_REGISTRYINDEX, client->rL_ref);
 
 	if (read < 0)
 	{
-		if ((errno != EAGAIN) && (errno != EWOULDBLOCK)) {
-			ev_io_stop(loop, &client->w_read);
-			client->active = false;
-			client->disconnected = true;
-			lua_pushnil(client->rL);
-			lua_pushliteral(client->rL, "disconnected");
-			pulsar_client_resume(client, client->rL, 2);
-		}
-		return;
-	}
-
-	if (read == 0)
-	{
-		ev_io_stop(loop, &client->w_read);
+		uv_read_stop((uv_stream_t*)client->sock);
 		client->active = false;
 		client->disconnected = true;
 		lua_pushnil(client->rL);
@@ -377,6 +210,19 @@ static void tcp_client_read_cb(struct ev_loop *loop, struct ev_io *_watcher, int
 		pulsar_client_resume(client, client->rL, 2);
 		return;
 	}
+	if (read == 0) return;
+
+	if (client->read_buf_len - client->read_buf_pos < read) {
+		char *newbuf = malloc(client->read_buf_len + read);
+		memcpy(newbuf, client->read_buf, client->read_buf_pos);
+		free(client->read_buf);
+		client->read_buf = newbuf;
+		client->read_buf_len += read;
+	}
+
+	memcpy(client->read_buf + client->read_buf_pos, buf->base, read);
+	buf_free((uv_buf_t*)buf);
+
 	client->read_buf_pos += read;
 
 	if ((client->read_buf_pos) && (client->read_wait_len > 0) && (client->read_buf_pos >= client->read_wait_len)) {
@@ -413,6 +259,7 @@ static void tcp_client_read_cb(struct ev_loop *loop, struct ev_io *_watcher, int
 				client->read_wait_len = 0;
 				free(client->read_wait_until);
 				if (client->read_wait_ignorelen) free(client->read_wait_ignore);
+				client->read_wait_ignore = NULL;
 				client->read_wait_ignorelen = 0;
 				client->read_wait_until = NULL;
 
@@ -424,13 +271,106 @@ static void tcp_client_read_cb(struct ev_loop *loop, struct ev_io *_watcher, int
 	}
 }
 
+static int pulsar_tcp_client_read(lua_State *L) {
+	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
+	if (!client->active) {
+		lua_pushnil(L);
+		lua_pushliteral(L, "client read not active");
+		return 2;
+	}
+
+	int len = luaL_checknumber(L, 2);
+	if (len == 0) {
+		lua_pushliteral(L, "");
+		return 1;
+	}
+
+	// No need to wait, we already have enough data
+	if (len <= client->read_buf_pos) {
+		lua_pushlstring(L, client->read_buf, len);
+		char *newbuf = malloc(client->read_buf_len);
+		if (client->read_buf_pos > len) memcpy(newbuf, client->read_buf + len, client->read_buf_pos - len);
+		free(client->read_buf);
+		client->read_buf = newbuf;
+		client->read_buf_pos -= len;
+		return 1;
+	}
+
+	lua_pushthread(L); client->rL = lua_tothread(L, -1); client->rL_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+	client->read_wait_len = len;
+	return lua_yield(L, 0);
+}
+
+static int pulsar_tcp_client_read_until(lua_State *L) {
+	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
+	if (!client->active) {
+		lua_pushnil(L);
+		lua_pushliteral(L, "client read not active");
+		return 2;
+	}
+
+	size_t len;
+	const char *until = luaL_checklstring(L, 2, &len);
+	if (len < 1) {
+		lua_pushnil(L);
+		lua_pushliteral(L, "empty until");
+		return 2;
+	}
+	size_t ignorelen = 0;
+	const char *ignore = NULL;
+	if (lua_isstring(L, 3)) ignore = lua_tolstring(L, 3, &ignorelen);
+
+	// No need to wait, we may have enough data
+	if (len <= client->read_buf_pos) {
+		size_t pos = 0;
+		while (pos <= client->read_buf_pos - len) {
+			if (!memcmp(client->read_buf + pos, until, len)) {
+				if (ignorelen && (ignorelen <= pos) && !memcmp(client->read_buf + pos - ignorelen, ignore, ignorelen))
+					lua_pushlstring(L, client->read_buf, pos - ignorelen);
+				else
+					lua_pushlstring(L, client->read_buf, pos);
+				char *newbuf = malloc(client->read_buf_len);
+				if (client->read_buf_pos > pos + len) memcpy(newbuf, client->read_buf + pos + len, client->read_buf_pos - pos - len);
+				free(client->read_buf);
+				client->read_buf = newbuf;
+				client->read_buf_pos -= pos + len;
+				return 1;
+			}
+			pos++;
+		}
+	}
+
+	lua_pushthread(L); client->rL = lua_tothread(L, -1); lua_pop(L, 1);
+	client->read_wait_len = WAIT_LEN_UNTIL;
+	client->read_wait_until = malloc((1+strlen(until)) * sizeof(char));
+	strcpy(client->read_wait_until, until);
+	client->read_wait_ignorelen = ignorelen;
+	if (ignorelen) {
+		client->read_wait_ignore = malloc((1+strlen(ignore)) * sizeof(char));
+		strcpy(client->read_wait_ignore, ignore);
+	}
+	return lua_yield(L, 0);
+}
+
+static int pulsar_tcp_client_start(lua_State *L) {
+	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
+	uv_read_start((uv_stream_t*)client->sock, buf_alloc, tcp_client_read_cb);
+	client->active = true;
+	return 0;
+}
+static int pulsar_tcp_client_stop(lua_State *L) {
+	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
+	uv_read_stop((uv_stream_t*)client->sock);
+	client->active = false;
+	return 0;
+}
+
 static int pulsar_tcp_client_getpeername(lua_State *L)
 {
 	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
-
 	struct sockaddr_in peer;
-	socklen_t peer_len = sizeof(peer);
-	if (getpeername(client->fd, (struct sockaddr *) &peer, &peer_len) < 0) {
+	int peerlen = sizeof(peer);
+	if (uv_tcp_getpeername(client->sock, (struct sockaddr*)&peer, &peerlen)) {
 		lua_pushnil(L);
 		lua_pushstring(L, "getpeername failed");
 	} else {
@@ -440,52 +380,29 @@ static int pulsar_tcp_client_getpeername(lua_State *L)
 	return 2;
 }
 
-/**************************************************************************************
- ** TCP Server calls
- **************************************************************************************/
-static int pulsar_tcp_server_close(lua_State *L) {
-	pulsar_tcp_server *serv = (pulsar_tcp_server *)luaL_checkudata (L, 1, MT_PULSAR_TCP_SERVER);
-	ev_io_stop(serv->loop->loop, &serv->w_accept);
-	serv->active = false;
-	if (serv->fd) close(serv->fd);
-	serv->fd = 0;
-	luaL_unref(L, LUA_REGISTRYINDEX, serv->client_fct_ref);
-	return 0;
-}
-static int pulsar_tcp_server_start(lua_State *L) {
-	pulsar_tcp_server *serv = (pulsar_tcp_server *)luaL_checkudata (L, 1, MT_PULSAR_TCP_SERVER);
-	ev_io_start(serv->loop->loop, &serv->w_accept);
-	serv->active = true;
-	return 0;
-}
-static int pulsar_tcp_server_stop(lua_State *L) {
-	pulsar_tcp_server *serv = (pulsar_tcp_server *)luaL_checkudata (L, 1, MT_PULSAR_TCP_SERVER);
-	ev_io_stop(serv->loop->loop, &serv->w_accept);
-	serv->active = false;
-	return 0;
-}
+static void tcp_client_connect_cb(uv_connect_t *_con, int status) {
+	pulsar_tcp_client_connect *con = (pulsar_tcp_client_connect*)_con;
+	lua_State *L = con->L;
+	if (status) {
+		uv_close((uv_handle_t*)con->sock, NULL);
+		free(con->sock);
+		free(con);
+		lua_pushnil(L);
+		lua_pushstring(L, "could not connect");
+		pulsar_client_resume(NULL, L, 2);
+		return;
+	}
 
-static void tcp_server_accept_cb(struct ev_loop *loop, struct ev_io *_watcher, int revents) {
-	if (EV_ERROR & revents) return;
-
-	pulsar_tcp_server *serv = (pulsar_tcp_server *)_watcher;
-
-	struct sockaddr_in client_addr;
-	socklen_t client_len = sizeof(client_addr);
-	int fd = accept(serv->fd, (struct sockaddr *)&client_addr, &client_len);
-	if (fd < 0) return;
-	if (!set_non_blocking(fd)) return;
 
 	// Initialize and start watcher to read client requests
-	lua_rawgeti(serv->L, LUA_REGISTRYINDEX, serv->client_fct_ref);
-	pulsar_tcp_client *client = (pulsar_tcp_client*)lua_newuserdata(serv->L, sizeof(pulsar_tcp_client));
-	pulsar_setmeta(serv->L, MT_PULSAR_TCP_CLIENT);
-	client->loop = serv->loop;
-	client->fd = fd;
+	pulsar_tcp_client *client = (pulsar_tcp_client*)lua_newuserdata(L, sizeof(pulsar_tcp_client));
+	pulsar_setmeta(L, MT_PULSAR_TCP_CLIENT);
+	client->sock = con->sock;
+	client->sock->data = client;
+	client->loop = con->loop;
+	client->closed = false;
 	client->active = false;
 	client->disconnected = false;
-	ev_io_init(&client->w_read, tcp_client_read_cb, fd, EV_READ);
-	ev_io_init(&client->w_send, tcp_client_send_cb, fd, EV_WRITE);
 
 	client->read_wait_ignorelen = 0;
 	client->read_wait_ignore = NULL;
@@ -495,20 +412,89 @@ static void tcp_server_accept_cb(struct ev_loop *loop, struct ev_io *_watcher, i
 	client->read_buf_len = DEFAULT_BUFFER_SIZE;
 	client->read_buf = malloc(client->read_buf_len * sizeof(char));
 
-	client->send_buf_pos = 0;
-	client->send_buf_len = 0;
-	client->send_buf = NULL;
-	client->send_buf_chain = NULL;
+	client->standalone = true;
+
+	free(con);
+	pulsar_client_resume(client, L, 1);
+}
+
+static int pulsar_tcp_client_new(lua_State *L)
+{
+	pulsar_loop *loop = (pulsar_loop *)luaL_checkudata (L, 1, MT_PULSAR_LOOP);
+	const char *address = luaL_checkstring(L, 2);
+	int port = luaL_checknumber(L, 3);
+
+	pulsar_tcp_client_connect *req = (pulsar_tcp_client_connect*)malloc(sizeof(pulsar_tcp_client_connect));
+	req->sock = malloc(uv_handle_size(UV_TCP));
+	uv_tcp_init(loop->loop, req->sock);
+	struct sockaddr_in addr;
+	uv_ip4_addr(address, port, &addr);
+	uv_tcp_connect((uv_connect_t*)req, req->sock, (const struct sockaddr*)&addr, tcp_client_connect_cb);
+
+	req->loop = loop;
+
+	lua_pushthread(L); req->L = lua_tothread(L, -1); req->L_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+	return lua_yield(L, 0);
+}
+
+/**************************************************************************************
+ ** TCP Server calls
+ **************************************************************************************/
+static void tcp_server_accept_cb(uv_stream_t *watcher, int status) {
+	if (status == -1) {
+		return;
+	}
+
+	pulsar_tcp_server *serv = (pulsar_tcp_server *)watcher;
+
+	// Initialize and start watcher to read client requests
+	lua_rawgeti(serv->L, LUA_REGISTRYINDEX, serv->client_fct_ref);
+	pulsar_tcp_client *client = (pulsar_tcp_client*)lua_newuserdata(serv->L, sizeof(pulsar_tcp_client));
+	pulsar_setmeta(serv->L, MT_PULSAR_TCP_CLIENT);
+	client->loop = serv->loop;
+	client->sock = malloc(uv_handle_size(UV_TCP));
+	uv_tcp_init(serv->loop->loop, client->sock);
+	if (uv_accept(watcher, (uv_stream_t*)client->sock)) {
+		uv_close((uv_handle_t*)client->sock, NULL);
+		lua_pop(serv->L, 1);
+		return;
+	}
+	client->sock->data = client;
+	client->active = false;
+	client->disconnected = false;
+	client->closed = false;
+
+	client->read_wait_ignorelen = 0;
+	client->read_wait_ignore = NULL;
+	client->read_wait_len = 0;
+	client->read_wait_until = NULL;
+	client->read_buf_pos = 0;
+	client->read_buf_len = DEFAULT_BUFFER_SIZE;
+	client->read_buf = malloc(client->read_buf_len * sizeof(char));
 
 	client->standalone = false;
 
 	lua_State *L = lua_newthread(serv->L);
+	lua_atpanic(L, pulsar_panic);
 	lua_pushvalue(serv->L, -1);
 	client->co_ref = luaL_ref(serv->L, LUA_REGISTRYINDEX);
 	lua_xmove(serv->L, L, 3);
 	pulsar_client_resume(client, L, 2);
 }
 
+static int pulsar_tcp_server_close(lua_State *L) {
+	pulsar_tcp_server *serv = (pulsar_tcp_server *)luaL_checkudata (L, 1, MT_PULSAR_TCP_SERVER);
+	uv_close((uv_handle_t*)&serv->sock, NULL);
+	serv->active = false;
+	luaL_unref(L, LUA_REGISTRYINDEX, serv->client_fct_ref);
+	return 0;
+}
+static int pulsar_tcp_server_start(lua_State *L) {
+	pulsar_tcp_server *serv = (pulsar_tcp_server *)luaL_checkudata (L, 1, MT_PULSAR_TCP_SERVER);
+	uv_listen((uv_stream_t*)&serv->sock, 128, tcp_server_accept_cb);
+	serv->active = true;
+	return 0;
+}
 
 /**************************************************************************************
  ** Timers
@@ -520,7 +506,7 @@ static void pulsar_timer_resume(pulsar_timer *timer, lua_State *L, int nargs) {
 
 	// Finished, end the timer
 	if (!ret) {
-		ev_timer_stop(timer->loop->loop, &timer->w_timeout);
+		uv_timer_stop(&timer->w_timeout);
 		timer->active = false;
 		return;
 	}
@@ -529,39 +515,13 @@ static void pulsar_timer_resume(pulsar_timer *timer, lua_State *L, int nargs) {
 		printf("Error while running timer's coroutine: %s\n", lua_tostring(L, -1));
 		traceback(L);
 
-		ev_timer_stop(timer->loop->loop, &timer->w_timeout);
+		uv_timer_stop(&timer->w_timeout);
 		timer->active = false;
 		return;
 	}
 }
 
-static int pulsar_timer_close(lua_State *L) {
-	pulsar_timer *timer = (pulsar_timer *)luaL_checkudata (L, 1, MT_PULSAR_TIMER);
-	ev_timer_stop(timer->loop->loop, &timer->w_timeout);
-	timer->active = false;
-	luaL_unref(L, LUA_REGISTRYINDEX, timer->co_ref);
-	return 0;
-}
-static int pulsar_timer_start(lua_State *L) {
-	pulsar_timer *timer = (pulsar_timer *)luaL_checkudata (L, 1, MT_PULSAR_TIMER);
-	ev_timer_start(timer->loop->loop, &timer->w_timeout);
-	timer->active = true;
-	return 0;
-}
-static int pulsar_timer_stop(lua_State *L) {
-	pulsar_timer *timer = (pulsar_timer *)luaL_checkudata (L, 1, MT_PULSAR_TIMER);
-	ev_timer_stop(timer->loop->loop, &timer->w_timeout);
-	timer->active = false;
-	return 0;
-}
-static int pulsar_timer_next(lua_State *L) {
-	pulsar_timer *timer = (pulsar_timer *)luaL_checkudata (L, 1, MT_PULSAR_TIMER);
-	return lua_yield(L, 0);
-}
-
-static void timer_cb(struct ev_loop *loop, ev_timer *_watcher, int revents) {
-	if (EV_ERROR & revents) return;
-
+static void timer_cb(uv_timer_t *_watcher, int status) {
 	pulsar_timer *timer = (pulsar_timer *)_watcher;
 
 	if (timer->first_run) {
@@ -570,6 +530,29 @@ static void timer_cb(struct ev_loop *loop, ev_timer *_watcher, int revents) {
 	} else {
 		pulsar_timer_resume(timer, timer->L, 0);
 	}
+}
+
+static int pulsar_timer_close(lua_State *L) {
+	pulsar_timer *timer = (pulsar_timer *)luaL_checkudata (L, 1, MT_PULSAR_TIMER);
+	uv_timer_stop(&timer->w_timeout);
+	timer->active = false;
+	luaL_unref(L, LUA_REGISTRYINDEX, timer->co_ref);
+	return 0;
+}
+static int pulsar_timer_start(lua_State *L) {
+	pulsar_timer *timer = (pulsar_timer *)luaL_checkudata (L, 1, MT_PULSAR_TIMER);
+	uv_timer_start(&timer->w_timeout, timer_cb, timer->timeout, timer->repeat);
+	timer->active = true;
+	return 0;
+}
+static int pulsar_timer_stop(lua_State *L) {
+	pulsar_timer *timer = (pulsar_timer *)luaL_checkudata (L, 1, MT_PULSAR_TIMER);
+	uv_timer_stop(&timer->w_timeout);
+	timer->active = false;
+	return 0;
+}
+static int pulsar_timer_next(lua_State *L) {
+	return lua_yield(L, 0);
 }
 
 /**************************************************************************************
@@ -582,7 +565,7 @@ static void pulsar_idle_resume(pulsar_idle *idle, lua_State *L, int nargs) {
 
 	// Finished, end the idle
 	if (!ret) {
-		ev_idle_stop(idle->loop->loop, &idle->w_timeout);
+		uv_idle_stop(&idle->w_timeout);
 		idle->active = false;
 		return;
 	}
@@ -591,39 +574,13 @@ static void pulsar_idle_resume(pulsar_idle *idle, lua_State *L, int nargs) {
 		printf("Error while running idle's coroutine: %s\n", lua_tostring(L, -1));
 		traceback(L);
 
-		ev_idle_stop(idle->loop->loop, &idle->w_timeout);
+		uv_idle_stop(&idle->w_timeout);
 		idle->active = false;
 		return;
 	}
 }
 
-static int pulsar_idle_close(lua_State *L) {
-	pulsar_idle *idle = (pulsar_idle *)luaL_checkudata (L, 1, MT_PULSAR_IDLE);
-	ev_idle_stop(idle->loop->loop, &idle->w_timeout);
-	idle->active = false;
-	luaL_unref(L, LUA_REGISTRYINDEX, idle->co_ref);
-	return 0;
-}
-static int pulsar_idle_start(lua_State *L) {
-	pulsar_idle *idle = (pulsar_idle *)luaL_checkudata (L, 1, MT_PULSAR_IDLE);
-	ev_idle_start(idle->loop->loop, &idle->w_timeout);
-	idle->active = true;
-	return 0;
-}
-static int pulsar_idle_stop(lua_State *L) {
-	pulsar_idle *idle = (pulsar_idle *)luaL_checkudata (L, 1, MT_PULSAR_IDLE);
-	ev_idle_stop(idle->loop->loop, &idle->w_timeout);
-	idle->active = false;
-	return 0;
-}
-static int pulsar_idle_next(lua_State *L) {
-	pulsar_idle *idle = (pulsar_idle *)luaL_checkudata (L, 1, MT_PULSAR_IDLE);
-	return lua_yield(L, 0);
-}
-
-static void idle_cb(struct ev_loop *loop, ev_idle *_watcher, int revents) {
-	if (EV_ERROR & revents) return;
-
+static void idle_cb(uv_idle_t *_watcher, int status) {
 	pulsar_idle *idle = (pulsar_idle *)_watcher;
 
 	if (idle->first_run) {
@@ -633,6 +590,30 @@ static void idle_cb(struct ev_loop *loop, ev_idle *_watcher, int revents) {
 		pulsar_idle_resume(idle, idle->L, 0);
 	}
 }
+
+static int pulsar_idle_close(lua_State *L) {
+	pulsar_idle *idle = (pulsar_idle *)luaL_checkudata (L, 1, MT_PULSAR_IDLE);
+	uv_idle_stop(&idle->w_timeout);
+	idle->active = false;
+	luaL_unref(L, LUA_REGISTRYINDEX, idle->co_ref);
+	return 0;
+}
+static int pulsar_idle_start(lua_State *L) {
+	pulsar_idle *idle = (pulsar_idle *)luaL_checkudata (L, 1, MT_PULSAR_IDLE);
+	uv_idle_start(&idle->w_timeout, idle_cb);
+	idle->active = true;
+	return 0;
+}
+static int pulsar_idle_stop(lua_State *L) {
+	pulsar_idle *idle = (pulsar_idle *)luaL_checkudata (L, 1, MT_PULSAR_IDLE);
+	uv_idle_stop(&idle->w_timeout);
+	idle->active = false;
+	return 0;
+}
+static int pulsar_idle_next(lua_State *L) {
+	return lua_yield(L, 0);
+}
+
 
 /**************************************************************************************
  ** Idle Workers
@@ -644,7 +625,7 @@ static void pulsar_idle_worker_resume(pulsar_idle_worker *idle_worker, lua_State
 
 	// Finished, end the idle_worker
 	if (!ret) {
-		ev_idle_stop(idle_worker->loop->loop, &idle_worker->w_timeout);
+		uv_idle_stop(&idle_worker->w_timeout);
 		idle_worker->active = false;
 		return;
 	}
@@ -653,15 +634,32 @@ static void pulsar_idle_worker_resume(pulsar_idle_worker *idle_worker, lua_State
 		printf("Error while running idle_worker's coroutine: %s\n", lua_tostring(L, -1));
 		traceback(L);
 
-		ev_idle_stop(idle_worker->loop->loop, &idle_worker->w_timeout);
+		uv_idle_stop(&idle_worker->w_timeout);
 		idle_worker->active = false;
 		return;
 	}
 }
 
+static void idle_worker_cb(uv_idle_t *_watcher, int status) {
+	pulsar_idle_worker *idle_worker = (pulsar_idle_worker *)_watcher;
+	if (!idle_worker->chain) {
+		uv_idle_stop(&idle_worker->w_timeout);
+		idle_worker->active = false;
+		return;
+	}
+
+	pulsar_idle_worker_chain *chain = idle_worker->chain;
+	idle_worker->chain = idle_worker->chain->next;
+	lua_State *rL = chain->L;
+	int nargs = chain->nargs;
+	free(chain);
+
+	pulsar_idle_worker_resume(idle_worker, rL, nargs);
+}
+
 static int pulsar_idle_worker_close(lua_State *L) {
 	pulsar_idle_worker *idle_worker = (pulsar_idle_worker *)luaL_checkudata (L, 1, MT_PULSAR_IDLE_WORKER);
-	ev_idle_stop(idle_worker->loop->loop, &idle_worker->w_timeout);
+	uv_idle_stop(&idle_worker->w_timeout);
 	idle_worker->active = false;
 	while (idle_worker->chain) {
 		pulsar_idle_worker_chain *chain = idle_worker->chain;
@@ -671,13 +669,15 @@ static int pulsar_idle_worker_close(lua_State *L) {
 	}
 	return 0;
 }
+
 static int pulsar_idle_worker_split(lua_State *L) {
 	pulsar_idle_worker *idle_worker = (pulsar_idle_worker *)luaL_checkudata (L, 1, MT_PULSAR_IDLE_WORKER);
-	ev_idle_start(idle_worker->loop->loop, &idle_worker->w_timeout);
+	uv_idle_start(&idle_worker->w_timeout, idle_worker_cb);
 	idle_worker->active = true;
 
 	pulsar_idle_worker_chain *chain = malloc(sizeof(pulsar_idle_worker_chain));
 	lua_pushthread(L); chain->L = lua_tothread(L, -1); lua_pop(L, 1);
+	chain->nargs = 0;
 	chain->next = NULL;
 
 	if (!idle_worker->chain) idle_worker->chain = chain;
@@ -690,22 +690,31 @@ static int pulsar_idle_worker_split(lua_State *L) {
 	return lua_yield(L, 0);
 }
 
-static void idle_worker_cb(struct ev_loop *loop, ev_idle *_watcher, int revents) {
-	if (EV_ERROR & revents) return;
+static int pulsar_idle_worker_register(lua_State *L) {
+	pulsar_idle_worker *idle_worker = (pulsar_idle_worker *)luaL_checkudata (L, 1, MT_PULSAR_IDLE_WORKER);
+	if (!lua_isfunction(L, 2)) { lua_pushstring(L, "argument 1 is not a function"); lua_error(L); return 0; }
 
-	pulsar_idle_worker *idle_worker = (pulsar_idle_worker *)_watcher;
-	if (!idle_worker->chain) {
-		ev_idle_stop(idle_worker->loop->loop, &idle_worker->w_timeout);
-		idle_worker->active = false;
-		return;
+	uv_idle_start(&idle_worker->w_timeout, idle_worker_cb);
+	idle_worker->active = true;
+
+	pulsar_idle_worker_chain *chain = malloc(sizeof(pulsar_idle_worker_chain));
+	chain->L = lua_newthread(L);
+	chain->L_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+	chain->nargs = 0;
+	lua_atpanic(chain->L, pulsar_panic);
+	lua_pushvalue(L, 2);
+	lua_xmove(L, chain->L, 1);
+	stackDump(chain->L);
+
+	chain->next = NULL;
+
+	if (!idle_worker->chain) idle_worker->chain = chain;
+	else {
+		pulsar_idle_worker_chain *tail = idle_worker->chain;
+		while (tail->next) tail = tail->next;
+		tail->next = chain;
 	}
-
-	pulsar_idle_worker_chain *chain = idle_worker->chain;
-	idle_worker->chain = idle_worker->chain->next;
-	lua_State *rL = chain->L;
-	free(chain);
-
-	pulsar_idle_worker_resume(idle_worker, rL, 0);
+	return 0;
 }
 
 /**************************************************************************************
@@ -717,8 +726,7 @@ static int pulsar_loop_default(lua_State *L)
 	if (main_loop_ref == LUA_NOREF) {
 		pulsar_loop *loop = (pulsar_loop*)lua_newuserdata(L, sizeof(pulsar_loop));
 		pulsar_setmeta(L, MT_PULSAR_LOOP);
-		loop->loop = ev_default_loop(0);
-		pulsar_eio_init(loop->loop);
+		loop->loop = uv_default_loop();
 		lua_pushvalue(L, -1);
 		main_loop_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 	} else {
@@ -731,21 +739,21 @@ static int pulsar_loop_new(lua_State *L)
 {
 	pulsar_loop *loop = (pulsar_loop*)lua_newuserdata(L, sizeof(pulsar_loop));
 	pulsar_setmeta(L, MT_PULSAR_LOOP);
-	loop->loop = ev_loop_new(EVFLAG_AUTO);
+	loop->loop = uv_loop_new();
 	return 1;
 }
 
 static int pulsar_loop_close(lua_State *L)
 {
 	pulsar_loop *loop = (pulsar_loop *)luaL_checkudata (L, 1, MT_PULSAR_LOOP);
-	ev_loop_destroy(loop->loop);
+	uv_loop_delete(loop->loop);
 	return 0;
 }
 
 static int pulsar_loop_run(lua_State *L)
 {
 	pulsar_loop *loop = (pulsar_loop *)luaL_checkudata (L, 1, MT_PULSAR_LOOP);
-	ev_run(loop->loop, 0);
+	uv_run(loop->loop, 0);
 	return 0;
 }
 
@@ -756,122 +764,20 @@ static int pulsar_tcp_server_new(lua_State *L)
 	int port = luaL_checknumber(L, 3);
 	if (!lua_isfunction(L, 4)) { lua_pushstring(L, "argument 3 is not a function"); lua_error(L); return 0; }
 
-	int fd;
-	struct sockaddr_in addr;
-	int addr_len = sizeof(addr);
-
-	// Create server socket
-	if ((fd = socket(PF_INET, SOCK_STREAM, 0)) < 0)
-	{
-		lua_pushnil(L);
-		lua_pushstring(L, "socket error when creating server");
-		return 2;
-	}
-
-	int optval = 1;
-	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof optval);
-
-	bzero(&addr, sizeof(addr));
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(port);
-	if (inet_pton(AF_INET, address, &addr.sin_addr) != 1) {
-		lua_pushnil(L);
-		lua_pushstring(L, "socket error when resolving bind address");
-		return 2;
-	}
-
-	// Bind socket to address
-	if (bind(fd, (struct sockaddr*) &addr, sizeof(addr)) != 0)
-	{
-		lua_pushnil(L);
-		lua_pushstring(L, "socket error when binding server");
-		return 2;
-	}
-
-	// Start listing on the socket
-	if (listen(fd, 50) < 0)
-	{
-		lua_pushnil(L);
-		lua_pushstring(L, "socket error when listening server");
-		return 2;
-	}
-
-	if (!set_non_blocking(fd)) {
-		lua_pushnil(L);
-		lua_pushstring(L, "socket error when setting server non blocking");
-		return 2;
-	}
-
-	lua_pushvalue(L, 4);
-	int fctref = luaL_ref(L, LUA_REGISTRYINDEX);
+	struct sockaddr_in bind_addr;
+	uv_ip4_addr(address, port, &bind_addr);
 
 	// Initialize and start a watcher to accepts client requests
 	pulsar_tcp_server *serv = (pulsar_tcp_server*)lua_newuserdata(L, sizeof(pulsar_tcp_server));
 	pulsar_setmeta(L, MT_PULSAR_TCP_SERVER);
+	uv_tcp_init(loop->loop, &serv->sock);
+	uv_tcp_bind(&serv->sock, (const struct sockaddr*)&bind_addr);
 	serv->L = L;
 	serv->loop = loop;
-	serv->fd = fd;
 	serv->active = false;
-	serv->client_fct_ref = fctref;
 
-	ev_io_init(&serv->w_accept, tcp_server_accept_cb, fd, EV_READ);
-	return 1;
-}
-
-static int pulsar_tcp_client_new(lua_State *L)
-{
-	pulsar_loop *loop = (pulsar_loop *)luaL_checkudata (L, 1, MT_PULSAR_LOOP);
-	const char *address = luaL_checkstring(L, 2);
-	int port = luaL_checknumber(L, 3);
-
-	// Create server socket
-	int fd;
-	if ((fd = socket(PF_INET, SOCK_STREAM, 0)) < 0)
-	{
-		lua_pushnil(L);
-		lua_pushstring(L, "socket error when creating client");
-		return 2;
-	}
-
-	struct sockaddr_in addr;
-	int addr_len = sizeof(addr);
-	bzero(&addr, sizeof(addr));
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(port);
-	if (inet_pton(AF_INET, address, &addr.sin_addr) != 1) {
-		lua_pushnil(L);
-		lua_pushstring(L, "socket error when resolving connect address");
-		return 2;
-	}
-
-	if (connect(fd, (struct sockaddr *)&addr, addr_len)) return 0;
-	if (!set_non_blocking(fd)) return 0;
-
-	// Initialize and start watcher to read client requests
-	pulsar_tcp_client *client = (pulsar_tcp_client*)lua_newuserdata(L, sizeof(pulsar_tcp_client));
-	pulsar_setmeta(L, MT_PULSAR_TCP_CLIENT);
-	client->loop = loop;
-	client->fd = fd;
-	client->active = false;
-	client->disconnected = false;
-	ev_io_init(&client->w_read, tcp_client_read_cb, fd, EV_READ);
-	ev_io_init(&client->w_send, tcp_client_send_cb, fd, EV_WRITE);
-
-	client->read_wait_ignorelen = 0;
-	client->read_wait_ignore = NULL;
-	client->read_wait_len = 0;
-	client->read_wait_until = NULL;
-	client->read_buf_pos = 0;
-	client->read_buf_len = DEFAULT_BUFFER_SIZE;
-	client->read_buf = malloc(client->read_buf_len * sizeof(char));
-
-	client->send_buf_pos = 0;
-	client->send_buf_len = 0;
-	client->send_buf = NULL;
-	client->send_buf_chain = NULL;
-
-	client->standalone = true;
-
+	lua_pushvalue(L, 4);
+	serv->client_fct_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 	return 1;
 }
 
@@ -890,14 +796,16 @@ static int pulsar_timer_new(lua_State *L)
 	timer->first_run = true;
 
 	timer->L = lua_newthread(L);
-	lua_pushvalue(L, -1);
+	lua_atpanic(timer->L, pulsar_panic);
 	lua_pushvalue(L, 4);
 	lua_pushvalue(L, 5);
-	lua_xmove(L, timer->L, 3);
+	lua_xmove(L, timer->L, 2);
 
 	timer->co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+	timer->timeout = (int)first * 1000;
+	timer->repeat = (int)repeat * 1000;
 
-	ev_timer_init(&timer->w_timeout, timer_cb, first, repeat);
+	uv_timer_init(loop->loop, &timer->w_timeout);
 	return 1;
 }
 
@@ -914,14 +822,14 @@ static int pulsar_idle_new(lua_State *L)
 	idle->first_run = true;
 
 	idle->L = lua_newthread(L);
-	lua_pushvalue(L, -1);
+	lua_atpanic(idle->L, pulsar_panic);
 	lua_pushvalue(L, 2);
 	lua_pushvalue(L, 3);
-	lua_xmove(L, idle->L, 3);
+	lua_xmove(L, idle->L, 2);
 
 	idle->co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
-	ev_idle_init(&idle->w_timeout, idle_cb);
+	uv_idle_init(loop->loop, &idle->w_timeout);
 	return 1;
 }
 
@@ -936,10 +844,9 @@ static int pulsar_idle_worker_new(lua_State *L)
 	idle->active = false;
 	idle->chain = NULL;
 
-	ev_idle_init(&idle->w_timeout, idle_worker_cb);
+	uv_idle_init(loop->loop, &idle->w_timeout);
 	return 1;
 }
-
 
 /**************************************************************************************
  ** Global things
@@ -951,8 +858,8 @@ static const struct luaL_reg meth_pulsar_loop[] =
 	{"tcpClient", pulsar_tcp_client_new},
 	{"timer", pulsar_timer_new},
 	{"idle", pulsar_idle_new},
+	{"worker", pulsar_idle_worker_new},
 	{"longTask", pulsar_idle_worker_new},
-	{"resolve", pulsar_resolve_dns},
 	{"close", pulsar_loop_close},
 	{"__gc", pulsar_loop_close},
 	{NULL, NULL},
@@ -977,6 +884,7 @@ static const struct luaL_reg meth_pulsar_idle[] =
 };
 static const struct luaL_reg meth_pulsar_idle_worker[] =
 {
+	{"register", pulsar_idle_worker_register},
 	{"split", pulsar_idle_worker_split},
 	{"close", pulsar_idle_worker_close},
 	{"__gc", pulsar_idle_worker_close},
@@ -985,7 +893,6 @@ static const struct luaL_reg meth_pulsar_idle_worker[] =
 static const struct luaL_reg meth_pulsar_tcp_server[] =
 {
 	{"start", pulsar_tcp_server_start},
-	{"stop", pulsar_tcp_server_stop},
 	{"close", pulsar_tcp_server_close},
 	{"__gc", pulsar_tcp_server_close},
 	{NULL, NULL},
@@ -1051,6 +958,7 @@ static void set_info (lua_State *L)
 int luaopen_pulsar(lua_State *L)
 {
 	signal(SIGPIPE, SIG_IGN);
+	lua_atpanic(L, pulsar_panic);
 
 	pulsar_createmeta(L, MT_PULSAR_LOOP, meth_pulsar_loop);
 	pulsar_createmeta(L, MT_PULSAR_TIMER, meth_pulsar_timer);
