@@ -175,7 +175,7 @@ static void tcp_client_send_cb(uv_write_t *_req, int status){
 	pulsar_tcp_client_send_chain *req = (pulsar_tcp_client_send_chain*)_req;
 	pulsar_tcp_client *client = req->client;
 
-	free(req->buf.base);
+	//free(req->buf.base);
 	if (!req->nowait) {
 		lua_pushnumber(req->sL, req->buf.len);
 		pulsar_client_resume(client, req->sL, 1);
