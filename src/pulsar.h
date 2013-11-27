@@ -49,7 +49,6 @@ typedef struct
 	pulsar_loop *loop;
 
 	lua_State *L;
-	int L_ref;
 
 	bool active;
 	bool first_run;
@@ -85,7 +84,6 @@ typedef struct
 	pulsar_loop *loop;
 
 	lua_State *L;
-	int L_ref;
 
 	bool active;
 	bool first_run;

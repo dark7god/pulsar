@@ -73,13 +73,20 @@ static void stackDump (lua_State *L) {
 
 static int pulsar_panic(lua_State *L) {
 	printf("OMFG PANIC: %s\n", lua_tostring(L, -1));
+	stackDump(L);
+	traceback(L);
+	return 0;
+}
+static int pulsar_panic_main(lua_State *L) {
+	printf("OMFG PANIC MAIN: %s\n", lua_tostring(L, -1));
+	stackDump(L);
 	traceback(L);
 	return 0;
 }
 
 static void buf_alloc(uv_handle_t* tcp, size_t size, uv_buf_t *b) {
-	b->len = size;
-	b->base = (char*)malloc(sizeof(char) * size);
+	b->len = DEFAULT_BUFFER_SIZE;
+	b->base = (char*)malloc(sizeof(char) * DEFAULT_BUFFER_SIZE);
 }
 
 static void buf_free(uv_buf_t *b) {
@@ -89,49 +96,15 @@ static void buf_free(uv_buf_t *b) {
 /**************************************************************************************
  ** TCP Client calls
  **************************************************************************************/
-static void pulsar_client_resume(pulsar_tcp_client *client, lua_State *L, int nargs) {
-	int ret = lua_resume(L, nargs);
-	// More to do
-	if (ret == LUA_YIELD) return;
-	if (!client) return;
-	if (client->standalone) return;
-
-	// Finished, end the client
-	if (!ret) {
-		uv_read_stop((uv_stream_t*)client->sock);
-		if (!client->closed) uv_close((uv_handle_t*)client->sock, NULL);
-		client->closed = true;
-		client->active = false;
-		client->disconnected = true;
-		// Let the rest free up by GC
-		return;
-	}
-
-	if (ret == LUA_ERRRUN) {
-		printf("Error while running client's coroutine (fd): %s\n", lua_tostring(L, -1));
-		traceback(L);
-
-		uv_read_stop((uv_stream_t*)client->sock);
-		client->active = false;
-		client->disconnected = true;
-		// Let the rest free up by GC
-		return;
-	}
-}
-
-static int pulsar_tcp_client_close(lua_State *L) {
-	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
-	uv_read_stop((uv_stream_t*)client->sock);
-	client->active = false;
-	client->disconnected = true;
-	if (!client->closed) uv_close((uv_handle_t*)client->sock, NULL);
+static void pulsar_client_resume(pulsar_tcp_client *client, lua_State *L, int nargs);
+static void client_close(pulsar_tcp_client *client) {
+	if (client->closed) return;
 	client->closed = true;
 
 	// Resume waiting coroutines so that they can fail
 	if (client->read_wait_len) {
 		client->read_wait_len = 0;
 		if (lua_status(client->rL) == LUA_YIELD) {
-			printf("resuming dying read\n");
 			lua_pushnil(client->rL);
 			lua_pushliteral(client->rL, "disconnected");
 			pulsar_client_resume(client, client->rL, 2);
@@ -139,20 +112,62 @@ static int pulsar_tcp_client_close(lua_State *L) {
 		}
 	}
 
+	uv_read_stop((uv_stream_t*)client->sock);
+	client->active = false;
+	client->disconnected = true;
+	uv_close((uv_handle_t*)client->sock, NULL);
+
 	if (client->read_buf) free(client->read_buf);
 	client->read_buf = NULL;
 	free(client->sock);
+}
+
+static void pulsar_client_resume(pulsar_tcp_client *client, lua_State *L, int nargs) {
+	if (client->closed) return;
+//		stackDump(L);
+//		traceback(L);
+//	lua_gc (L, LUA_GCCOLLECT, 0);
+//	stackDump(L);
+	int ret = lua_resume(L, nargs);
+	// More to do
+	if (!ret) return;
+	if (ret == LUA_YIELD) return;
+	if (!client) return;
+	if (client->standalone) return;
+
+	// Finished, end the client
+/*	if (!ret) {
+		printf("Closing at resume %lx\n", client);
+		client_close(client);
+		// Let the rest free up by GC
+		return;
+	}
+*/
+	if (ret == LUA_ERRRUN) {
+		printf("Error while running client's coroutine (fd): %s\n", lua_tostring(L, -1));
+		stackDump(L);
+		traceback(L);
+		printf("Closing at error %lx\n", client);
+		client_close(client);
+		// Let the rest free up by GC
+		return;
+	}
+}
+
+static int pulsar_tcp_client_close(lua_State *L) {
+	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
+	client_close(client);
 	return 0;
 }
 
 static int pulsar_tcp_client_is_connected(lua_State *L) {
 	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
-	lua_pushboolean(L, client->active && !client->disconnected);
+	lua_pushboolean(L, !client->closed && client->active && !client->disconnected);
 	return 1;
 }
 static int pulsar_tcp_client_has_data(lua_State *L) {
 	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
-	lua_pushboolean(L, client->read_buf_pos > 0);
+	lua_pushboolean(L, !client->closed && client->read_buf_pos > 0);
 	return 1;
 }
 
@@ -160,20 +175,20 @@ static void tcp_client_send_cb(uv_write_t *_req, int status){
 	pulsar_tcp_client_send_chain *req = (pulsar_tcp_client_send_chain*)_req;
 	pulsar_tcp_client *client = req->client;
 
-	luaL_unref(req->sL, LUA_REGISTRYINDEX, req->data_ref);
-	luaL_unref(req->sL, LUA_REGISTRYINDEX, req->sL_ref);
 	free(req->buf.base);
-
 	if (!req->nowait) {
 		lua_pushnumber(req->sL, req->buf.len);
 		pulsar_client_resume(client, req->sL, 1);
 	}
+	luaL_unref(req->sL, LUA_REGISTRYINDEX, req->data_ref);
+	luaL_unref(req->sL, LUA_REGISTRYINDEX, req->sL_ref);
 
 	free(req);
 }
 
 static int pulsar_tcp_client_send(lua_State *L) {
 	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
+	if (client->closed) return 0;
 	size_t datalen;
 	const char *data = lua_tolstring(L, 2, &datalen);
 	bool nowait = lua_toboolean(L, 3);
@@ -190,7 +205,7 @@ static int pulsar_tcp_client_send(lua_State *L) {
 
 	lua_pushvalue(L, 2);
 	req->data_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-
+	
 	if (nowait) return 0;
 	else return lua_yield(L, 0);
 	return 0;
@@ -198,20 +213,18 @@ static int pulsar_tcp_client_send(lua_State *L) {
 
 static void tcp_client_read_cb(uv_stream_t *watcher, ssize_t read, const uv_buf_t *buf){
 	pulsar_tcp_client *client = (pulsar_tcp_client *)watcher->data;
-	luaL_unref(client->rL, LUA_REGISTRYINDEX, client->rL_ref);
+	if (client->closed) return;
 
 	if (read < 0)
 	{
-		uv_read_stop((uv_stream_t*)client->sock);
-		client->active = false;
-		client->disconnected = true;
+		client_close(client);
 		lua_pushnil(client->rL);
 		lua_pushliteral(client->rL, "disconnected");
 		pulsar_client_resume(client, client->rL, 2);
 		return;
 	}
 	if (read == 0) return;
-
+	
 	if (client->read_buf_len - client->read_buf_pos < read) {
 		char *newbuf = malloc(client->read_buf_len + read);
 		memcpy(newbuf, client->read_buf, client->read_buf_pos);
@@ -235,6 +248,7 @@ static void tcp_client_read_cb(uv_stream_t *watcher, ssize_t read, const uv_buf_
 		client->read_wait_len = 0;
 
 		pulsar_client_resume(client, client->rL, 1);
+		luaL_unref(client->rL, LUA_REGISTRYINDEX, client->rL_ref);
 		return;
 	}
 
@@ -248,8 +262,9 @@ static void tcp_client_read_cb(uv_stream_t *watcher, ssize_t read, const uv_buf_
 			if (!memcmp(client->read_buf + pos, until, len)) {
 				if (ignorelen && (ignorelen <= pos) && !memcmp(client->read_buf + pos - ignorelen, ignore, ignorelen))
 					lua_pushlstring(client->rL, client->read_buf, pos - ignorelen);
-				else
+				else {
 					lua_pushlstring(client->rL, client->read_buf, pos);
+				}
 
 				char *newbuf = malloc(client->read_buf_len);
 				if (client->read_buf_pos > pos + len) memcpy(newbuf, client->read_buf + pos + len, client->read_buf_pos - pos - len);
@@ -264,6 +279,7 @@ static void tcp_client_read_cb(uv_stream_t *watcher, ssize_t read, const uv_buf_
 				client->read_wait_until = NULL;
 
 				pulsar_client_resume(client, client->rL, 1);
+				luaL_unref(client->rL, LUA_REGISTRYINDEX, client->rL_ref);
 				return;
 			}
 			pos++;
@@ -273,7 +289,7 @@ static void tcp_client_read_cb(uv_stream_t *watcher, ssize_t read, const uv_buf_
 
 static int pulsar_tcp_client_read(lua_State *L) {
 	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
-	if (!client->active) {
+	if (!client->active || client->closed) {
 		lua_pushnil(L);
 		lua_pushliteral(L, "client read not active");
 		return 2;
@@ -303,7 +319,7 @@ static int pulsar_tcp_client_read(lua_State *L) {
 
 static int pulsar_tcp_client_read_until(lua_State *L) {
 	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
-	if (!client->active) {
+	if (!client->active || client->closed) {
 		lua_pushnil(L);
 		lua_pushliteral(L, "client read not active");
 		return 2;
@@ -340,7 +356,7 @@ static int pulsar_tcp_client_read_until(lua_State *L) {
 		}
 	}
 
-	lua_pushthread(L); client->rL = lua_tothread(L, -1); lua_pop(L, 1);
+	lua_pushthread(L); client->rL = lua_tothread(L, -1); client->rL_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 	client->read_wait_len = WAIT_LEN_UNTIL;
 	client->read_wait_until = malloc((1+strlen(until)) * sizeof(char));
 	strcpy(client->read_wait_until, until);
@@ -354,12 +370,14 @@ static int pulsar_tcp_client_read_until(lua_State *L) {
 
 static int pulsar_tcp_client_start(lua_State *L) {
 	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
+	if (client->closed) return 0;
 	uv_read_start((uv_stream_t*)client->sock, buf_alloc, tcp_client_read_cb);
 	client->active = true;
 	return 0;
 }
 static int pulsar_tcp_client_stop(lua_State *L) {
 	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
+	if (client->closed) return 0;
 	uv_read_stop((uv_stream_t*)client->sock);
 	client->active = false;
 	return 0;
@@ -368,6 +386,7 @@ static int pulsar_tcp_client_stop(lua_State *L) {
 static int pulsar_tcp_client_getpeername(lua_State *L)
 {
 	pulsar_tcp_client *client = (pulsar_tcp_client *)luaL_checkudata (L, 1, MT_PULSAR_TCP_CLIENT);
+	if (client->closed) return 0;
 	struct sockaddr_in peer;
 	int peerlen = sizeof(peer);
 	if (uv_tcp_getpeername(client->sock, (struct sockaddr*)&peer, &peerlen)) {
@@ -455,8 +474,9 @@ static void tcp_server_accept_cb(uv_stream_t *watcher, int status) {
 	client->sock = malloc(uv_handle_size(UV_TCP));
 	uv_tcp_init(serv->loop->loop, client->sock);
 	if (uv_accept(watcher, (uv_stream_t*)client->sock)) {
+		client->closed = true;
 		uv_close((uv_handle_t*)client->sock, NULL);
-		lua_pop(serv->L, 1);
+		lua_pop(serv->L, 2);
 		return;
 	}
 	client->sock->data = client;
@@ -476,10 +496,9 @@ static void tcp_server_accept_cb(uv_stream_t *watcher, int status) {
 
 	lua_State *L = lua_newthread(serv->L);
 	lua_atpanic(L, pulsar_panic);
-	lua_pushvalue(serv->L, -1);
 	client->co_ref = luaL_ref(serv->L, LUA_REGISTRYINDEX);
-	lua_xmove(serv->L, L, 3);
-	pulsar_client_resume(client, L, 2);
+	lua_xmove(serv->L, L, 2);
+	pulsar_client_resume(client, L, 1);
 }
 
 static int pulsar_tcp_server_close(lua_State *L) {
@@ -651,6 +670,7 @@ static void idle_worker_cb(uv_idle_t *_watcher, int status) {
 	pulsar_idle_worker_chain *chain = idle_worker->chain;
 	idle_worker->chain = idle_worker->chain->next;
 	lua_State *rL = chain->L;
+	luaL_unref(rL, LUA_REGISTRYINDEX, chain->L_ref);
 	int nargs = chain->nargs;
 	free(chain);
 
@@ -665,6 +685,7 @@ static int pulsar_idle_worker_close(lua_State *L) {
 		pulsar_idle_worker_chain *chain = idle_worker->chain;
 		idle_worker->chain = idle_worker->chain->next;
 
+		luaL_unref(L, LUA_REGISTRYINDEX, chain->L_ref);
 		free(chain);
 	}
 	return 0;
@@ -676,7 +697,7 @@ static int pulsar_idle_worker_split(lua_State *L) {
 	idle_worker->active = true;
 
 	pulsar_idle_worker_chain *chain = malloc(sizeof(pulsar_idle_worker_chain));
-	lua_pushthread(L); chain->L = lua_tothread(L, -1); lua_pop(L, 1);
+	lua_pushthread(L); chain->L = lua_tothread(L, -1); chain->L_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 	chain->nargs = 0;
 	chain->next = NULL;
 
@@ -704,7 +725,6 @@ static int pulsar_idle_worker_register(lua_State *L) {
 	lua_atpanic(chain->L, pulsar_panic);
 	lua_pushvalue(L, 2);
 	lua_xmove(L, chain->L, 1);
-	stackDump(chain->L);
 
 	chain->next = NULL;
 
@@ -778,6 +798,7 @@ static int pulsar_tcp_server_new(lua_State *L)
 
 	lua_pushvalue(L, 4);
 	serv->client_fct_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+	printf("created server with fct ref %d\n", serv->client_fct_ref);
 	return 1;
 }
 
@@ -958,7 +979,7 @@ static void set_info (lua_State *L)
 int luaopen_pulsar(lua_State *L)
 {
 	signal(SIGPIPE, SIG_IGN);
-	lua_atpanic(L, pulsar_panic);
+	lua_atpanic(L, pulsar_panic_main);
 
 	pulsar_createmeta(L, MT_PULSAR_LOOP, meth_pulsar_loop);
 	pulsar_createmeta(L, MT_PULSAR_TIMER, meth_pulsar_timer);
