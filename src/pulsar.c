@@ -117,7 +117,7 @@ static void client_close(pulsar_tcp_client *client) {
 		}
 	}
 
-	uv_read_stop((uv_stream_t*)client->sock);
+	if (client->active) uv_read_stop((uv_stream_t*)client->sock);
 	client->active = false;
 	client->disconnected = true;
 	uv_close((uv_handle_t*)client->sock, close_cb);
