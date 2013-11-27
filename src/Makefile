@@ -9,8 +9,10 @@ CC	= gcc
 TARGET	= ../pulsar.so
 OBJS	= pulsar.o
 LIBS	=
-CFLAGS	= -I $(LUA_PREFIX)/include -fPIC -ggdb -DDMALLOC -DDMALLOC_FUNC_CHECK -Wall
-LDFLAGS	= -shared -fPIC -luv -ggdb -ldmalloc
+#CFLAGS	= -I $(LUA_PREFIX)/include -fPIC -ggdb -DDMALLOC -DDMALLOC_FUNC_CHECK -Wall
+#LDFLAGS	= -shared -fPIC -luv -ggdb -ldmalloc
+CFLAGS	= -I $(LUA_PREFIX)/include -fPIC -ggdb -Wall
+LDFLAGS	= -shared -fPIC -luv -ggdb
 
 default: $(TARGET)
 

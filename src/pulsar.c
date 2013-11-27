@@ -97,6 +97,11 @@ static void buf_free(uv_buf_t *b) {
  ** TCP Client calls
  **************************************************************************************/
 static void pulsar_client_resume(pulsar_tcp_client *client, lua_State *L, int nargs);
+
+static void close_cb(uv_handle_t* handle) {
+	free((void*)handle);
+}
+
 static void client_close(pulsar_tcp_client *client) {
 	if (client->closed) return;
 	client->closed = true;
@@ -115,19 +120,14 @@ static void client_close(pulsar_tcp_client *client) {
 	uv_read_stop((uv_stream_t*)client->sock);
 	client->active = false;
 	client->disconnected = true;
-	uv_close((uv_handle_t*)client->sock, NULL);
+	uv_close((uv_handle_t*)client->sock, close_cb);
 
 	if (client->read_buf) free(client->read_buf);
 	client->read_buf = NULL;
-	free(client->sock);
 }
 
 static void pulsar_client_resume(pulsar_tcp_client *client, lua_State *L, int nargs) {
 	if (client->closed) return;
-//		stackDump(L);
-//		traceback(L);
-//	lua_gc (L, LUA_GCCOLLECT, 0);
-//	stackDump(L);
 	int ret = lua_resume(L, nargs);
 	// More to do
 	if (!ret) return;
@@ -403,8 +403,7 @@ static void tcp_client_connect_cb(uv_connect_t *_con, int status) {
 	pulsar_tcp_client_connect *con = (pulsar_tcp_client_connect*)_con;
 	lua_State *L = con->L;
 	if (status) {
-		uv_close((uv_handle_t*)con->sock, NULL);
-		free(con->sock);
+		uv_close((uv_handle_t*)con->sock, close_cb);
 		free(con);
 		lua_pushnil(L);
 		lua_pushstring(L, "could not connect");
@@ -475,7 +474,7 @@ static void tcp_server_accept_cb(uv_stream_t *watcher, int status) {
 	uv_tcp_init(serv->loop->loop, client->sock);
 	if (uv_accept(watcher, (uv_stream_t*)client->sock)) {
 		client->closed = true;
-		uv_close((uv_handle_t*)client->sock, NULL);
+		uv_close((uv_handle_t*)client->sock, close_cb);
 		lua_pop(serv->L, 2);
 		return;
 	}
