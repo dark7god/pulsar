@@ -44,7 +44,7 @@ typedef struct
  **************************************************************************************/
 typedef struct
 {
-	uv_idle_t w_timeout;
+	uv_idle_t *w_timeout;
 	
 	pulsar_loop *loop;
 
@@ -66,7 +66,7 @@ typedef struct pulsar_idle_worker_chain pulsar_idle_worker_chain;
 
 typedef struct
 {
-	uv_idle_t w_timeout;
+	uv_idle_t *w_timeout;
 	
 	pulsar_loop *loop;
 
@@ -79,7 +79,7 @@ typedef struct
  **************************************************************************************/
 typedef struct
 {
-	uv_timer_t w_timeout;
+	uv_timer_t *w_timeout;
 	
 	pulsar_loop *loop;
 
@@ -97,7 +97,7 @@ typedef struct
  **************************************************************************************/
 typedef struct
 {
-	uv_tcp_t sock;
+	uv_tcp_t *sock;
 	
 	pulsar_loop *loop;
 

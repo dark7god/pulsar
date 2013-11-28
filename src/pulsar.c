@@ -218,9 +218,6 @@ static void tcp_client_read_cb(uv_stream_t *watcher, ssize_t read, const uv_buf_
 	if (read < 0)
 	{
 		client_close(client);
-		lua_pushnil(client->rL);
-		lua_pushliteral(client->rL, "disconnected");
-		pulsar_client_resume(client, client->rL, 2);
 		return;
 	}
 	if (read == 0) return;
@@ -458,12 +455,12 @@ static int pulsar_tcp_client_new(lua_State *L)
 /**************************************************************************************
  ** TCP Server calls
  **************************************************************************************/
-static void tcp_server_accept_cb(uv_stream_t *watcher, int status) {
+static void tcp_server_accept_cb(uv_stream_t *_watcher, int status) {
 	if (status == -1) {
 		return;
 	}
 
-	pulsar_tcp_server *serv = (pulsar_tcp_server *)watcher;
+	pulsar_tcp_server *serv = (pulsar_tcp_server *)_watcher->data;
 
 	// Initialize and start watcher to read client requests
 	lua_rawgeti(serv->L, LUA_REGISTRYINDEX, serv->client_fct_ref);
@@ -472,7 +469,7 @@ static void tcp_server_accept_cb(uv_stream_t *watcher, int status) {
 	client->loop = serv->loop;
 	client->sock = malloc(uv_handle_size(UV_TCP));
 	uv_tcp_init(serv->loop->loop, client->sock);
-	if (uv_accept(watcher, (uv_stream_t*)client->sock)) {
+	if (uv_accept(_watcher, (uv_stream_t*)client->sock)) {
 		client->closed = true;
 		uv_close((uv_handle_t*)client->sock, close_cb);
 		lua_pop(serv->L, 2);
@@ -502,14 +499,14 @@ static void tcp_server_accept_cb(uv_stream_t *watcher, int status) {
 
 static int pulsar_tcp_server_close(lua_State *L) {
 	pulsar_tcp_server *serv = (pulsar_tcp_server *)luaL_checkudata (L, 1, MT_PULSAR_TCP_SERVER);
-	uv_close((uv_handle_t*)&serv->sock, NULL);
+	uv_close((uv_handle_t*)serv->sock, close_cb);
 	serv->active = false;
 	luaL_unref(L, LUA_REGISTRYINDEX, serv->client_fct_ref);
 	return 0;
 }
 static int pulsar_tcp_server_start(lua_State *L) {
 	pulsar_tcp_server *serv = (pulsar_tcp_server *)luaL_checkudata (L, 1, MT_PULSAR_TCP_SERVER);
-	uv_listen((uv_stream_t*)&serv->sock, 128, tcp_server_accept_cb);
+	uv_listen((uv_stream_t*)serv->sock, 128, tcp_server_accept_cb);
 	serv->active = true;
 	return 0;
 }
@@ -524,7 +521,7 @@ static void pulsar_timer_resume(pulsar_timer *timer, lua_State *L, int nargs) {
 
 	// Finished, end the timer
 	if (!ret) {
-		uv_timer_stop(&timer->w_timeout);
+		uv_timer_stop(timer->w_timeout);
 		timer->active = false;
 		return;
 	}
@@ -533,14 +530,14 @@ static void pulsar_timer_resume(pulsar_timer *timer, lua_State *L, int nargs) {
 		printf("Error while running timer's coroutine: %s\n", lua_tostring(L, -1));
 		traceback(L);
 
-		uv_timer_stop(&timer->w_timeout);
+		uv_timer_stop(timer->w_timeout);
 		timer->active = false;
 		return;
 	}
 }
 
 static void timer_cb(uv_timer_t *_watcher, int status) {
-	pulsar_timer *timer = (pulsar_timer *)_watcher;
+	pulsar_timer *timer = (pulsar_timer *)_watcher->data;
 
 	if (timer->first_run) {
 		timer->first_run = false;
@@ -552,20 +549,21 @@ static void timer_cb(uv_timer_t *_watcher, int status) {
 
 static int pulsar_timer_close(lua_State *L) {
 	pulsar_timer *timer = (pulsar_timer *)luaL_checkudata (L, 1, MT_PULSAR_TIMER);
-	uv_timer_stop(&timer->w_timeout);
+	uv_timer_stop(timer->w_timeout);
+	uv_close((uv_handle_t*)timer->w_timeout, close_cb);
 	timer->active = false;
 	luaL_unref(L, LUA_REGISTRYINDEX, timer->co_ref);
 	return 0;
 }
 static int pulsar_timer_start(lua_State *L) {
 	pulsar_timer *timer = (pulsar_timer *)luaL_checkudata (L, 1, MT_PULSAR_TIMER);
-	uv_timer_start(&timer->w_timeout, timer_cb, timer->timeout, timer->repeat);
+	uv_timer_start(timer->w_timeout, timer_cb, timer->timeout, timer->repeat);
 	timer->active = true;
 	return 0;
 }
 static int pulsar_timer_stop(lua_State *L) {
 	pulsar_timer *timer = (pulsar_timer *)luaL_checkudata (L, 1, MT_PULSAR_TIMER);
-	uv_timer_stop(&timer->w_timeout);
+	uv_timer_stop(timer->w_timeout);
 	timer->active = false;
 	return 0;
 }
@@ -583,7 +581,7 @@ static void pulsar_idle_resume(pulsar_idle *idle, lua_State *L, int nargs) {
 
 	// Finished, end the idle
 	if (!ret) {
-		uv_idle_stop(&idle->w_timeout);
+		uv_idle_stop(idle->w_timeout);
 		idle->active = false;
 		return;
 	}
@@ -592,14 +590,14 @@ static void pulsar_idle_resume(pulsar_idle *idle, lua_State *L, int nargs) {
 		printf("Error while running idle's coroutine: %s\n", lua_tostring(L, -1));
 		traceback(L);
 
-		uv_idle_stop(&idle->w_timeout);
+		uv_idle_stop(idle->w_timeout);
 		idle->active = false;
 		return;
 	}
 }
 
 static void idle_cb(uv_idle_t *_watcher, int status) {
-	pulsar_idle *idle = (pulsar_idle *)_watcher;
+	pulsar_idle *idle = (pulsar_idle *)_watcher->data;
 
 	if (idle->first_run) {
 		idle->first_run = false;
@@ -611,20 +609,21 @@ static void idle_cb(uv_idle_t *_watcher, int status) {
 
 static int pulsar_idle_close(lua_State *L) {
 	pulsar_idle *idle = (pulsar_idle *)luaL_checkudata (L, 1, MT_PULSAR_IDLE);
-	uv_idle_stop(&idle->w_timeout);
+	uv_idle_stop(idle->w_timeout);
+	uv_close((uv_handle_t*)idle->w_timeout, close_cb);
 	idle->active = false;
 	luaL_unref(L, LUA_REGISTRYINDEX, idle->co_ref);
 	return 0;
 }
 static int pulsar_idle_start(lua_State *L) {
 	pulsar_idle *idle = (pulsar_idle *)luaL_checkudata (L, 1, MT_PULSAR_IDLE);
-	uv_idle_start(&idle->w_timeout, idle_cb);
+	uv_idle_start(idle->w_timeout, idle_cb);
 	idle->active = true;
 	return 0;
 }
 static int pulsar_idle_stop(lua_State *L) {
 	pulsar_idle *idle = (pulsar_idle *)luaL_checkudata (L, 1, MT_PULSAR_IDLE);
-	uv_idle_stop(&idle->w_timeout);
+	uv_idle_stop(idle->w_timeout);
 	idle->active = false;
 	return 0;
 }
@@ -643,7 +642,7 @@ static void pulsar_idle_worker_resume(pulsar_idle_worker *idle_worker, lua_State
 
 	// Finished, end the idle_worker
 	if (!ret) {
-		uv_idle_stop(&idle_worker->w_timeout);
+		uv_idle_stop(idle_worker->w_timeout);
 		idle_worker->active = false;
 		return;
 	}
@@ -652,16 +651,16 @@ static void pulsar_idle_worker_resume(pulsar_idle_worker *idle_worker, lua_State
 		printf("Error while running idle_worker's coroutine: %s\n", lua_tostring(L, -1));
 		traceback(L);
 
-		uv_idle_stop(&idle_worker->w_timeout);
+		uv_idle_stop(idle_worker->w_timeout);
 		idle_worker->active = false;
 		return;
 	}
 }
 
 static void idle_worker_cb(uv_idle_t *_watcher, int status) {
-	pulsar_idle_worker *idle_worker = (pulsar_idle_worker *)_watcher;
+	pulsar_idle_worker *idle_worker = (pulsar_idle_worker *)_watcher->data;
 	if (!idle_worker->chain) {
-		uv_idle_stop(&idle_worker->w_timeout);
+		uv_idle_stop(idle_worker->w_timeout);
 		idle_worker->active = false;
 		return;
 	}
@@ -678,7 +677,7 @@ static void idle_worker_cb(uv_idle_t *_watcher, int status) {
 
 static int pulsar_idle_worker_close(lua_State *L) {
 	pulsar_idle_worker *idle_worker = (pulsar_idle_worker *)luaL_checkudata (L, 1, MT_PULSAR_IDLE_WORKER);
-	uv_idle_stop(&idle_worker->w_timeout);
+	uv_idle_stop(idle_worker->w_timeout);
 	idle_worker->active = false;
 	while (idle_worker->chain) {
 		pulsar_idle_worker_chain *chain = idle_worker->chain;
@@ -687,12 +686,13 @@ static int pulsar_idle_worker_close(lua_State *L) {
 		luaL_unref(L, LUA_REGISTRYINDEX, chain->L_ref);
 		free(chain);
 	}
+	uv_close((uv_handle_t*)idle_worker->w_timeout, close_cb);
 	return 0;
 }
 
 static int pulsar_idle_worker_split(lua_State *L) {
 	pulsar_idle_worker *idle_worker = (pulsar_idle_worker *)luaL_checkudata (L, 1, MT_PULSAR_IDLE_WORKER);
-	uv_idle_start(&idle_worker->w_timeout, idle_worker_cb);
+	uv_idle_start(idle_worker->w_timeout, idle_worker_cb);
 	idle_worker->active = true;
 
 	pulsar_idle_worker_chain *chain = malloc(sizeof(pulsar_idle_worker_chain));
@@ -714,7 +714,7 @@ static int pulsar_idle_worker_register(lua_State *L) {
 	pulsar_idle_worker *idle_worker = (pulsar_idle_worker *)luaL_checkudata (L, 1, MT_PULSAR_IDLE_WORKER);
 	if (!lua_isfunction(L, 2)) { lua_pushstring(L, "argument 1 is not a function"); lua_error(L); return 0; }
 
-	uv_idle_start(&idle_worker->w_timeout, idle_worker_cb);
+	uv_idle_start(idle_worker->w_timeout, idle_worker_cb);
 	idle_worker->active = true;
 
 	pulsar_idle_worker_chain *chain = malloc(sizeof(pulsar_idle_worker_chain));
@@ -789,15 +789,16 @@ static int pulsar_tcp_server_new(lua_State *L)
 	// Initialize and start a watcher to accepts client requests
 	pulsar_tcp_server *serv = (pulsar_tcp_server*)lua_newuserdata(L, sizeof(pulsar_tcp_server));
 	pulsar_setmeta(L, MT_PULSAR_TCP_SERVER);
-	uv_tcp_init(loop->loop, &serv->sock);
-	uv_tcp_bind(&serv->sock, (const struct sockaddr*)&bind_addr);
+	serv->sock = (uv_tcp_t*)malloc(sizeof(uv_tcp_t));
+	serv->sock->data = serv;
+	uv_tcp_init(loop->loop, serv->sock);
+	uv_tcp_bind(serv->sock, (const struct sockaddr*)&bind_addr);
 	serv->L = L;
 	serv->loop = loop;
 	serv->active = false;
 
 	lua_pushvalue(L, 4);
 	serv->client_fct_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-	printf("created server with fct ref %d\n", serv->client_fct_ref);
 	return 1;
 }
 
@@ -825,7 +826,9 @@ static int pulsar_timer_new(lua_State *L)
 	timer->timeout = (int)first * 1000;
 	timer->repeat = (int)repeat * 1000;
 
-	uv_timer_init(loop->loop, &timer->w_timeout);
+	timer->w_timeout = (uv_timer_t*)malloc(sizeof(uv_timer_t));
+	timer->w_timeout->data = timer;
+	uv_timer_init(loop->loop, timer->w_timeout);
 	return 1;
 }
 
@@ -849,7 +852,9 @@ static int pulsar_idle_new(lua_State *L)
 
 	idle->co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
-	uv_idle_init(loop->loop, &idle->w_timeout);
+	idle->w_timeout = (uv_idle_t*)malloc(sizeof(uv_idle_t));
+	idle->w_timeout->data = idle;
+	uv_idle_init(loop->loop, idle->w_timeout);
 	return 1;
 }
 
@@ -864,7 +869,9 @@ static int pulsar_idle_worker_new(lua_State *L)
 	idle->active = false;
 	idle->chain = NULL;
 
-	uv_idle_init(loop->loop, &idle->w_timeout);
+	idle->w_timeout = (uv_idle_t*)malloc(sizeof(uv_idle_t));
+	idle->w_timeout->data = idle;
+	uv_idle_init(loop->loop, idle->w_timeout);
 	return 1;
 }
 
