@@ -1,6 +1,6 @@
 Pulsar
 =====
-libub + coroutines + lua = profit
+libuv + coroutines + lua = profit
 
 Description
 ===========
