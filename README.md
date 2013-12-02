@@ -224,6 +224,7 @@ Spawns
 local spawnfct = loop:spawn(fct)
 
 ... = spawnfct(...)
+```
 
 A spawn will let the given function run inside a worker thread (not a coroutine, a real OS thread).
 
