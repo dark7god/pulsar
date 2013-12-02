@@ -1,10 +1,10 @@
 Pulsar
 =====
-libev + coroutines + lua = profit
+libub + coroutines + lua = profit
 
 Description
 ===========
-Pulsar is born from the wish to use the awesome libev to handle many connections from a single thread and the wish to see callback based code die a painful death.
+Pulsar is born from the wish to use the awesome libuv to handle many connections from a single thread and the wish to see callback based code die a painful death.
 
 All code in pulsar runs into coroutines and the user writes it "old school" aka in blocking calls style. Except it doesnt block.
 Since an example is worth a thousands words:
@@ -39,7 +39,7 @@ Pulsar provides multiple kind of helpers:
 
 Loop
 ====
-All functions are bound to a loop, generally you will only need one. (See libev loops for more info)
+All functions are bound to a loop, generally you will only need one. (See libuv loops for more info)
 ```lua
 local loop = pulsar.newLoop()
 ```
