@@ -35,7 +35,8 @@ Pulsar provides multiple kind of helpers:
 * **TCP client**: connect a socket to a remote host/port
 * **Timer**: wakeup a coroutine at the given intervals
 * **Idle**: wakeup a coroutine when nothing else to do
-* **Long Task**: split up a long time consuming task to prevent blocking the application
+* **Worker**: split up a long time consuming task to prevent blocking the application
+* **Spawns**: spawn a new OS thread while mimicking a normal function call
 
 Loop
 ====
