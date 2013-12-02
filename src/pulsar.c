@@ -511,26 +511,42 @@ static int pulsar_tcp_server_start(lua_State *L) {
 	return 0;
 }
 
+static int pulsar_tcp_server_new(lua_State *L)
+{
+	pulsar_loop *loop = (pulsar_loop *)luaL_checkudata (L, 1, MT_PULSAR_LOOP);
+	const char *address = luaL_checkstring(L, 2);
+	int port = luaL_checknumber(L, 3);
+	if (!lua_isfunction(L, 4)) { lua_pushstring(L, "argument 3 is not a function"); lua_error(L); return 0; }
+
+	struct sockaddr_in bind_addr;
+	uv_ip4_addr(address, port, &bind_addr);
+
+	// Initialize and start a watcher to accepts client requests
+	pulsar_tcp_server *serv = (pulsar_tcp_server*)lua_newuserdata(L, sizeof(pulsar_tcp_server));
+	pulsar_setmeta(L, MT_PULSAR_TCP_SERVER);
+	serv->sock = (uv_tcp_t*)malloc(sizeof(uv_tcp_t));
+	serv->sock->data = serv;
+	uv_tcp_init(loop->loop, serv->sock);
+	uv_tcp_bind(serv->sock, (const struct sockaddr*)&bind_addr);
+	serv->L = L;
+	serv->loop = loop;
+	serv->active = false;
+
+	lua_pushvalue(L, 4);
+	serv->client_fct_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+	return 1;
+}
+
 /**************************************************************************************
  ** Timers
  **************************************************************************************/
 static void pulsar_timer_resume(pulsar_timer *timer, lua_State *L, int nargs) {
 	int ret = lua_resume(L, nargs);
-	// More to do
-	if (ret == LUA_YIELD) return;
-
-	// Finished, end the timer
-	if (!ret) {
-		uv_timer_stop(timer->w_timeout);
-		timer->active = false;
-		return;
-	}
-
 	if (ret == LUA_ERRRUN) {
 		printf("Error while running timer's coroutine: %s\n", lua_tostring(L, -1));
 		traceback(L);
 
-		uv_timer_stop(timer->w_timeout);
+		if (timer->active) uv_timer_stop(timer->w_timeout);
 		timer->active = false;
 		return;
 	}
@@ -539,6 +555,8 @@ static void pulsar_timer_resume(pulsar_timer *timer, lua_State *L, int nargs) {
 static void timer_cb(uv_timer_t *_watcher, int status) {
 	pulsar_timer *timer = (pulsar_timer *)_watcher->data;
 
+	uv_timer_stop(timer->w_timeout);
+	timer->active = false;
 	if (timer->first_run) {
 		timer->first_run = false;
 		pulsar_timer_resume(timer, timer->L, 1);
@@ -549,7 +567,7 @@ static void timer_cb(uv_timer_t *_watcher, int status) {
 
 static int pulsar_timer_close(lua_State *L) {
 	pulsar_timer *timer = (pulsar_timer *)luaL_checkudata (L, 1, MT_PULSAR_TIMER);
-	uv_timer_stop(timer->w_timeout);
+	if (timer->active) uv_timer_stop(timer->w_timeout);
 	uv_close((uv_handle_t*)timer->w_timeout, close_cb);
 	timer->active = false;
 	luaL_unref(L, LUA_REGISTRYINDEX, timer->co_ref);
@@ -563,12 +581,45 @@ static int pulsar_timer_start(lua_State *L) {
 }
 static int pulsar_timer_stop(lua_State *L) {
 	pulsar_timer *timer = (pulsar_timer *)luaL_checkudata (L, 1, MT_PULSAR_TIMER);
-	uv_timer_stop(timer->w_timeout);
+	if (timer->active) uv_timer_stop(timer->w_timeout);
 	timer->active = false;
 	return 0;
 }
 static int pulsar_timer_next(lua_State *L) {
+	pulsar_timer *timer = (pulsar_timer *)luaL_checkudata (L, 1, MT_PULSAR_TIMER);
+	uv_timer_again(timer->w_timeout);
+	timer->active = true;
 	return lua_yield(L, 0);
+}
+
+static int pulsar_timer_new(lua_State *L)
+{
+	pulsar_loop *loop = (pulsar_loop *)luaL_checkudata (L, 1, MT_PULSAR_LOOP);
+	float first = luaL_checknumber(L, 2);
+	float repeat = luaL_checknumber(L, 3);
+	if (!lua_isfunction(L, 4)) { lua_pushstring(L, "argument 3 is not a function"); lua_error(L); return 0; }
+
+	// Initialize and start a watcher to accepts client requests
+	pulsar_timer *timer = (pulsar_timer*)lua_newuserdata(L, sizeof(pulsar_timer));
+	pulsar_setmeta(L, MT_PULSAR_TIMER);
+	timer->loop = loop;
+	timer->active = false;
+	timer->first_run = true;
+
+	timer->L = lua_newthread(L);
+	lua_atpanic(timer->L, pulsar_panic);
+	lua_pushvalue(L, 4);
+	lua_pushvalue(L, 5);
+	lua_xmove(L, timer->L, 2);
+
+	timer->co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+	timer->timeout = (int)(first * 1000);
+	timer->repeat = (int)(repeat * 1000);
+
+	timer->w_timeout = (uv_timer_t*)malloc(sizeof(uv_timer_t));
+	timer->w_timeout->data = timer;
+	uv_timer_init(loop->loop, timer->w_timeout);
+	return 1;
 }
 
 /**************************************************************************************
@@ -631,6 +682,31 @@ static int pulsar_idle_next(lua_State *L) {
 	return lua_yield(L, 0);
 }
 
+static int pulsar_idle_new(lua_State *L)
+{
+	pulsar_loop *loop = (pulsar_loop *)luaL_checkudata (L, 1, MT_PULSAR_LOOP);
+	if (!lua_isfunction(L, 2)) { lua_pushstring(L, "argument 1 is not a function"); lua_error(L); return 0; }
+
+	// Initialize and start a watcher to accepts client requests
+	pulsar_idle *idle = (pulsar_idle*)lua_newuserdata(L, sizeof(pulsar_idle));
+	pulsar_setmeta(L, MT_PULSAR_IDLE);
+	idle->loop = loop;
+	idle->active = false;
+	idle->first_run = true;
+
+	idle->L = lua_newthread(L);
+	lua_atpanic(idle->L, pulsar_panic);
+	lua_pushvalue(L, 2);
+	lua_pushvalue(L, 3);
+	lua_xmove(L, idle->L, 2);
+
+	idle->co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+	idle->w_timeout = (uv_idle_t*)malloc(sizeof(uv_idle_t));
+	idle->w_timeout->data = idle;
+	uv_idle_init(loop->loop, idle->w_timeout);
+	return 1;
+}
 
 /**************************************************************************************
  ** Idle Workers
@@ -736,6 +812,281 @@ static int pulsar_idle_worker_register(lua_State *L) {
 	return 0;
 }
 
+static int pulsar_idle_worker_new(lua_State *L)
+{
+	pulsar_loop *loop = (pulsar_loop *)luaL_checkudata (L, 1, MT_PULSAR_LOOP);
+
+	// Initialize and start a watcher to accepts client requests
+	pulsar_idle_worker *idle = (pulsar_idle_worker*)lua_newuserdata(L, sizeof(pulsar_idle_worker));
+	pulsar_setmeta(L, MT_PULSAR_IDLE_WORKER);
+	idle->loop = loop;
+	idle->active = false;
+	idle->chain = NULL;
+
+	idle->w_timeout = (uv_idle_t*)malloc(sizeof(uv_idle_t));
+	idle->w_timeout->data = idle;
+	uv_idle_init(loop->loop, idle->w_timeout);
+	return 1;
+}
+
+
+/**************************************************************************************
+ ** Spawns
+ **************************************************************************************/
+
+static void writeTblFixed(pulsar_spawn_ret *s, const char *data, long len) {
+	if (len + s->bufpos + 1 >= s->buflen) {
+		s->buf = realloc(s->buf, (len + s->bufpos + 1) * sizeof(char));
+		s->buflen = len + s->bufpos + 1;
+	}
+	memcpy(s->buf + s->bufpos, data, len);
+	s->bufpos += len;
+}
+#define writeTbl(s, data) { writeTblFixed(s, data, strlen(data)); }
+
+static void tbl_dump_string(pulsar_spawn_ret *s, const char *str, size_t l)
+{
+	while (l--) {
+		switch (*str) {
+		case '"': case '\\': case '\n': {
+			writeTblFixed(s, "\\", 1);
+			writeTblFixed(s, str, 1);
+			break;
+		}
+		case '\r': {
+			writeTblFixed(s, "\\r", 2);
+			break;
+		}
+		case '\0': {
+			writeTblFixed(s, "\\000", 4);
+			break;
+		}
+		default: {
+			writeTblFixed(s, str, 1);
+			break;
+		}
+		}
+		str++;
+	}
+}
+
+static int tbl_dump_function(lua_State *L, const void* p, size_t sz, void* ud)
+{
+	pulsar_spawn_ret *s = (pulsar_spawn_ret*)ud;
+	tbl_dump_string(s, p, sz);
+	return 0;
+}
+
+static void tbl_basic_serialize(lua_State *L, pulsar_spawn_ret *s, int type, int idx)
+{
+	if (type == LUA_TNIL) {
+		writeTblFixed(s, "nil", 3);
+	} else if (type == LUA_TBOOLEAN) {
+		if (lua_toboolean(L, idx)) { writeTblFixed(s, "true", 4); }
+		else { writeTblFixed(s, "false", 5); }
+	} else if (type == LUA_TNUMBER) {
+		lua_pushvalue(L, idx);
+		size_t len;
+		const char *n = lua_tolstring(L, -1, &len);
+		writeTblFixed(s, n, len);
+		lua_pop(L, 1);
+	} else if (type == LUA_TSTRING) {
+		size_t len;
+		const char *str = lua_tolstring(L, idx, &len);
+		writeTblFixed(s, "\"", 1);
+		tbl_dump_string(s, str, len);
+		writeTblFixed(s, "\"", 1);
+	} else if (type == LUA_TFUNCTION) {
+		writeTblFixed(s, "loadstring(\"", 12);
+		lua_dump(L, tbl_dump_function, s);
+		writeTblFixed(s, "\")", 2);
+	} else if (type == LUA_TTABLE) {
+		int ktype, etype;
+
+		writeTblFixed(s, "{", 1);
+		/* table is in the stack at index 't' */
+		lua_pushnil(L);  /* first key */
+
+		while (lua_next(L, idx - 1) != 0)
+		{
+			ktype = lua_type(L, -2);
+			etype = lua_type(L, -1);
+
+			// Only save allowed types
+			if (
+				((ktype == LUA_TBOOLEAN) || (ktype == LUA_TNUMBER) || (ktype == LUA_TSTRING) || (ktype == LUA_TFUNCTION) || (ktype == LUA_TTABLE)) &&
+				((etype == LUA_TBOOLEAN) || (etype == LUA_TNUMBER) || (etype == LUA_TSTRING) || (etype == LUA_TFUNCTION) || (etype == LUA_TTABLE))
+				)
+			{
+				writeTblFixed(s, "[", 1);
+				tbl_basic_serialize(L, s, ktype, -2);
+				writeTblFixed(s, "]=", 2);
+				tbl_basic_serialize(L, s, etype, -1);
+				writeTblFixed(s, ",\n", 2);
+			}
+
+			/* removes 'value'; keeps 'key' for next iteration */
+			lua_pop(L, 1);
+		}
+		writeTblFixed(s, "}\n", 2);
+	} else {
+		printf("*WARNING* can not pass to/from spawn a value of type %s\n", lua_typename(L, type));
+	}
+}
+
+const char *spawn_ret_read(lua_State *L, void *data, size_t *size) {
+	pulsar_spawn_ret *ret = (pulsar_spawn_ret *)data;
+	if (!ret->bufpos) return NULL;
+	*size = ret->bufpos;
+	ret->bufpos = 0;
+	return ret->buf;
+}
+
+static void spawn_cb(uv_work_t *_watcher, int status) {
+	pulsar_spawn *spawn = (pulsar_spawn *)_watcher;
+
+	// We make a new coroutine to run the return function inside because the calling coroutine is currently paused and cant be used to call functions
+	pulsar_spawn_ret *ret = &spawn->ret;
+	lua_State *L = lua_newthread(spawn->L);
+	lua_load(L, spawn_ret_read, ret, "spawned code return");
+	lua_pcall(L, 0, ret->nbrets, 0);
+	free(ret->buf);
+	lua_xmove(L, spawn->L, ret->nbrets);
+	lua_remove(spawn->L, -ret->nbrets - 1);
+
+	int res = lua_resume(spawn->L, ret->nbrets);
+	luaL_unref(spawn->L, LUA_REGISTRYINDEX, spawn->L_ref);
+	free(spawn);
+	if (res == LUA_ERRRUN) {
+		printf("Error while running spawn's callback: %s\n", lua_tostring(spawn->L, -1));
+		traceback(spawn->L);
+	}
+}
+
+const char *spawn_read(lua_State *L, void *data, size_t *size) {
+	pulsar_spawn *spawn = (pulsar_spawn *)data;
+	if (!spawn->fctcode_len) return NULL;
+	*size = spawn->fctcode_len;
+	spawn->fctcode_len = 0;
+	return spawn->fctcode;
+}
+
+static void spawn_exec(uv_work_t *req) {
+	pulsar_spawn *spawn = (pulsar_spawn *)req;
+	lua_State *L = luaL_newstate();
+	luaL_openlibs(L);
+	lua_pushcfunction(L, traceback);  /* push traceback function */
+	int base = lua_gettop(L);
+
+	// Push main function
+	lua_load(L, spawn_read, spawn, "spawned code");
+	free(spawn->fctcode);
+
+	// Push args function and call it to get the args
+	lua_load(L, spawn_ret_read, &spawn->arg, "spawned code args");
+	free(spawn->arg.buf);
+	lua_pcall(L, 0, spawn->arg.nbrets, 0);
+
+	// Call the main functions with the args
+	lua_pcall(L, spawn->arg.nbrets, LUA_MULTRET, base);
+	
+	// Count & serialize returns
+	int nbrets = lua_gettop(L) - base;
+	pulsar_spawn_ret *ret = &spawn->ret;
+	ret->buf = malloc(sizeof(char) * 32);
+	ret->buflen = 32;
+	ret->buf[0] = 'r'; ret->buf[1] = 'e'; ret->buf[2] = 't'; ret->buf[3] = 'u'; ret->buf[4] = 'r'; ret->buf[5] = 'n'; ret->buf[6] = ' ';
+	ret->bufpos = 7;
+	
+	if (nbrets > 0) {
+		ret->nbrets = nbrets;
+		while (nbrets > 0) {
+			tbl_basic_serialize(L, ret, lua_type(L, -nbrets), -nbrets);
+			nbrets--;
+			if (nbrets) writeTblFixed(ret, ",", 1);
+		}
+		lua_pop(L, nbrets);
+	} else {
+		ret->nbrets = 1;
+		ret->buf[7] = 'n'; ret->buf[8] = 'i'; ret->buf[9] = 'l';
+		ret->bufpos = 10;
+	}
+	ret->buf[ret->bufpos] = '\0';
+
+	lua_remove(L, base);  /* remove traceback function */
+	lua_close(L);
+}
+
+static int spawn_dump(lua_State *L, const void* p, size_t sz, void* ud)
+{
+	pulsar_spawn_base *sbase = (pulsar_spawn_base*)ud;
+	sbase->fctcode = realloc(sbase->fctcode, sbase->fctcode_len + sz);
+	memcpy(sbase->fctcode + sbase->fctcode_len, p, sz);
+	sbase->fctcode_len += sz;
+	return 0;
+}
+
+static int pulsar_spawn_call(lua_State *L)
+{
+	pulsar_spawn_base *sbase = (pulsar_spawn_base *)luaL_checkudata (L, 1, MT_PULSAR_SPAWN);
+	pulsar_spawn *spawn = (pulsar_spawn*)malloc(sizeof(pulsar_spawn));
+
+	pulsar_spawn_ret *ret = &spawn->arg;
+	ret->buf = malloc(sizeof(char) * 32);
+	ret->buflen = 32;
+	ret->buf[0] = 'r'; ret->buf[1] = 'e'; ret->buf[2] = 't'; ret->buf[3] = 'u'; ret->buf[4] = 'r'; ret->buf[5] = 'n'; ret->buf[6] = ' ';
+	ret->bufpos = 7;
+	
+	int nbrets = lua_gettop(L) - 1;
+	if (nbrets > 0) {
+		ret->nbrets = nbrets;
+		while (nbrets > 0) {
+			tbl_basic_serialize(L, ret, lua_type(L, -nbrets), -nbrets);
+			nbrets--;
+			if (nbrets) writeTblFixed(ret, ",", 1);
+		}
+		lua_pop(L, nbrets);
+	} else {
+		ret->nbrets = 1;
+		ret->buf[7] = 'n'; ret->buf[8] = 'i'; ret->buf[9] = 'l';
+		ret->bufpos = 10;
+	}
+	ret->buf[ret->bufpos] = '\0';
+
+
+	spawn->fctcode = (char*)malloc(sbase->fctcode_len);
+	memcpy(spawn->fctcode, sbase->fctcode, sbase->fctcode_len);
+	spawn->fctcode_len = sbase->fctcode_len;
+	lua_pushthread(L); spawn->L = lua_tothread(L, -1); spawn->L_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+	uv_queue_work(sbase->loop->loop, (uv_work_t*)&spawn->work, spawn_exec, spawn_cb);
+	return lua_yield(L, 0);
+}
+
+static int pulsar_spawn_free(lua_State *L)
+{
+	pulsar_spawn_base *sbase = (pulsar_spawn_base *)luaL_checkudata (L, 1, MT_PULSAR_SPAWN);
+	if (sbase->fctcode) free(sbase->fctcode);
+	return 0;
+}
+
+static int pulsar_spawn_new(lua_State *L)
+{
+	pulsar_loop *loop = (pulsar_loop *)luaL_checkudata (L, 1, MT_PULSAR_LOOP);
+	if (!lua_isfunction(L, 2)) { lua_pushstring(L, "argument 1 is not a function"); lua_error(L); return 0; }
+
+	// Initialize and start a watcher to accepts client requests
+	pulsar_spawn_base *sbase = (pulsar_spawn_base*)lua_newuserdata(L, sizeof(pulsar_spawn_base));
+	pulsar_setmeta(L, MT_PULSAR_SPAWN);
+	sbase->loop = loop;
+	sbase->fctcode = NULL;
+	sbase->fctcode_len = 0;
+	lua_pushvalue(L, 2);
+	lua_dump(L, spawn_dump, sbase);
+	lua_pop(L, 1);
+
+	return 1;
+}
+
 /**************************************************************************************
  ** Loop calls
  **************************************************************************************/
@@ -776,105 +1127,6 @@ static int pulsar_loop_run(lua_State *L)
 	return 0;
 }
 
-static int pulsar_tcp_server_new(lua_State *L)
-{
-	pulsar_loop *loop = (pulsar_loop *)luaL_checkudata (L, 1, MT_PULSAR_LOOP);
-	const char *address = luaL_checkstring(L, 2);
-	int port = luaL_checknumber(L, 3);
-	if (!lua_isfunction(L, 4)) { lua_pushstring(L, "argument 3 is not a function"); lua_error(L); return 0; }
-
-	struct sockaddr_in bind_addr;
-	uv_ip4_addr(address, port, &bind_addr);
-
-	// Initialize and start a watcher to accepts client requests
-	pulsar_tcp_server *serv = (pulsar_tcp_server*)lua_newuserdata(L, sizeof(pulsar_tcp_server));
-	pulsar_setmeta(L, MT_PULSAR_TCP_SERVER);
-	serv->sock = (uv_tcp_t*)malloc(sizeof(uv_tcp_t));
-	serv->sock->data = serv;
-	uv_tcp_init(loop->loop, serv->sock);
-	uv_tcp_bind(serv->sock, (const struct sockaddr*)&bind_addr);
-	serv->L = L;
-	serv->loop = loop;
-	serv->active = false;
-
-	lua_pushvalue(L, 4);
-	serv->client_fct_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-	return 1;
-}
-
-static int pulsar_timer_new(lua_State *L)
-{
-	pulsar_loop *loop = (pulsar_loop *)luaL_checkudata (L, 1, MT_PULSAR_LOOP);
-	float first = luaL_checknumber(L, 2);
-	float repeat = luaL_checknumber(L, 3);
-	if (!lua_isfunction(L, 4)) { lua_pushstring(L, "argument 3 is not a function"); lua_error(L); return 0; }
-
-	// Initialize and start a watcher to accepts client requests
-	pulsar_timer *timer = (pulsar_timer*)lua_newuserdata(L, sizeof(pulsar_timer));
-	pulsar_setmeta(L, MT_PULSAR_TIMER);
-	timer->loop = loop;
-	timer->active = false;
-	timer->first_run = true;
-
-	timer->L = lua_newthread(L);
-	lua_atpanic(timer->L, pulsar_panic);
-	lua_pushvalue(L, 4);
-	lua_pushvalue(L, 5);
-	lua_xmove(L, timer->L, 2);
-
-	timer->co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-	timer->timeout = (int)first * 1000;
-	timer->repeat = (int)repeat * 1000;
-
-	timer->w_timeout = (uv_timer_t*)malloc(sizeof(uv_timer_t));
-	timer->w_timeout->data = timer;
-	uv_timer_init(loop->loop, timer->w_timeout);
-	return 1;
-}
-
-static int pulsar_idle_new(lua_State *L)
-{
-	pulsar_loop *loop = (pulsar_loop *)luaL_checkudata (L, 1, MT_PULSAR_LOOP);
-	if (!lua_isfunction(L, 2)) { lua_pushstring(L, "argument 1 is not a function"); lua_error(L); return 0; }
-
-	// Initialize and start a watcher to accepts client requests
-	pulsar_idle *idle = (pulsar_idle*)lua_newuserdata(L, sizeof(pulsar_idle));
-	pulsar_setmeta(L, MT_PULSAR_IDLE);
-	idle->loop = loop;
-	idle->active = false;
-	idle->first_run = true;
-
-	idle->L = lua_newthread(L);
-	lua_atpanic(idle->L, pulsar_panic);
-	lua_pushvalue(L, 2);
-	lua_pushvalue(L, 3);
-	lua_xmove(L, idle->L, 2);
-
-	idle->co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-
-	idle->w_timeout = (uv_idle_t*)malloc(sizeof(uv_idle_t));
-	idle->w_timeout->data = idle;
-	uv_idle_init(loop->loop, idle->w_timeout);
-	return 1;
-}
-
-static int pulsar_idle_worker_new(lua_State *L)
-{
-	pulsar_loop *loop = (pulsar_loop *)luaL_checkudata (L, 1, MT_PULSAR_LOOP);
-
-	// Initialize and start a watcher to accepts client requests
-	pulsar_idle_worker *idle = (pulsar_idle_worker*)lua_newuserdata(L, sizeof(pulsar_idle_worker));
-	pulsar_setmeta(L, MT_PULSAR_IDLE_WORKER);
-	idle->loop = loop;
-	idle->active = false;
-	idle->chain = NULL;
-
-	idle->w_timeout = (uv_idle_t*)malloc(sizeof(uv_idle_t));
-	idle->w_timeout->data = idle;
-	uv_idle_init(loop->loop, idle->w_timeout);
-	return 1;
-}
-
 /**************************************************************************************
  ** Global things
  **************************************************************************************/
@@ -887,6 +1139,7 @@ static const struct luaL_reg meth_pulsar_loop[] =
 	{"idle", pulsar_idle_new},
 	{"worker", pulsar_idle_worker_new},
 	{"longTask", pulsar_idle_worker_new},
+	{"spawn", pulsar_spawn_new},
 	{"close", pulsar_loop_close},
 	{"__gc", pulsar_loop_close},
 	{NULL, NULL},
@@ -915,6 +1168,12 @@ static const struct luaL_reg meth_pulsar_idle_worker[] =
 	{"split", pulsar_idle_worker_split},
 	{"close", pulsar_idle_worker_close},
 	{"__gc", pulsar_idle_worker_close},
+	{NULL, NULL},
+};
+static const struct luaL_reg meth_pulsar_spawn[] =
+{
+	{"__call", pulsar_spawn_call},
+	{"__gc", pulsar_spawn_free},
 	{NULL, NULL},
 };
 static const struct luaL_reg meth_pulsar_tcp_server[] =
@@ -993,6 +1252,7 @@ int luaopen_pulsar(lua_State *L)
 	pulsar_createmeta(L, MT_PULSAR_IDLE_WORKER, meth_pulsar_idle_worker);
 	pulsar_createmeta(L, MT_PULSAR_TCP_SERVER, meth_pulsar_tcp_server);
 	pulsar_createmeta(L, MT_PULSAR_TCP_CLIENT, meth_pulsar_tcp_client);
+	pulsar_createmeta(L, MT_PULSAR_SPAWN, meth_pulsar_spawn);
 
 	luaL_openlib(L, "pulsar", pulsarlib, 0);
 	set_info(L);

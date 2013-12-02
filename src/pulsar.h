@@ -30,6 +30,7 @@
 #define MT_PULSAR_IDLE_WORKER	"Pulsar Idle Worker"
 #define MT_PULSAR_TCP_SERVER	"Pulsar TCP Server"
 #define MT_PULSAR_TCP_CLIENT	"Pulsar TCP Client"
+#define MT_PULSAR_SPAWN		"Pulsar Spawn"
 
 /**************************************************************************************
  ** Loop
@@ -73,6 +74,38 @@ typedef struct
 	bool active;
 	pulsar_idle_worker_chain *chain;
 } pulsar_idle_worker;
+
+/**************************************************************************************
+ ** Spawns
+ **************************************************************************************/
+struct pulsar_spawn_ret_s
+{
+	char *buf;
+	size_t bufpos, buflen;
+	int nbrets;
+};
+typedef struct pulsar_spawn_ret_s pulsar_spawn_ret;
+
+typedef struct
+{
+	uv_work_t work;
+	
+	lua_State *L;
+	int L_ref;
+
+	char *fctcode;
+	size_t fctcode_len;
+	pulsar_spawn_ret arg;
+
+	pulsar_spawn_ret ret;
+} pulsar_spawn;
+
+typedef struct
+{
+	pulsar_loop *loop;
+	char *fctcode;
+	size_t fctcode_len;
+} pulsar_spawn_base;
 
 /**************************************************************************************
  ** Timers

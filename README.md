@@ -181,10 +181,12 @@ Stops the idle.
 Pause the coroutine, indicating we are finished with this iteration.
 
 
-Long Task
-=========
+Worker
+======
 ```lua
-local longtask = loop:longTask()
+local worker = loop:worker()
+
+worker:register(function() ... end)
 
 ...inside a coroutine...
 	local str = ""
@@ -192,19 +194,46 @@ local longtask = loop:longTask()
 	print("Start ...")
 	for i = 1, 300 do
 		str = str .. stradd
-		longtask:split()
+		worker:split()
 	end
 ```
 
-Long tasks allow you to split time consuming tasks into many small fragments, so that they do not block the application.
+Workers allow you to split time consuming tasks into many small fragments, so that they do not block the application.
 Split code must be running in a coroutine.
+Workers can also be used to register any arbitrary function to run when idle.
 
-You probably only need one longtask object in your application since it can split as many simultaneous tasks as you want.
+You probably only need one worker object in your application since it can split as many simultaneous tasks as you want.
 
-***longtask = loop:longTask()***
+***worker = loop:worker()***
 
-Creates a long task.
+Creates a worker.
 
-***longtask:split()***
+***worker:split()***
 
 Splits the current coroutine, allowing others to run. It will be waken up at the next possible occasion (by an internal idle handler).
+
+***worker:register(fct)***
+
+Registers fct to run when the worker has some time (when idle).
+The function will run inside a new coroutine.
+
+
+Spawns
+======
+```lua
+local spawnfct = loop:spawn(fct)
+
+... = spawnfct(...)
+
+A spawn will let the given function run inside a worker thread (not a coroutine, a real OS thread).
+
+***spawnfct = loop:spawn(fct)***
+
+Creates a spawn function from the given function.
+
+***... = spawnfct(...)***
+
+Call the spawn function with the given parameters.
+The parameters are serialized and passed to the new thread, the original coroutine pauses until the thread finishes.
+Return values are serialized and passed back to the main thread.
+This means a spawn function looks and behaves exactly like any other functions (i.e: is blocks and returns on finish) but can be used to run blocking code without blocking the main thread.
